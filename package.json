@@ -7,11 +7,11 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node --test",
-    "check": "node --check src/app.js && node --check src/lib/core.js && node --check scripts/build.mjs && node --check scripts/preview.mjs && node --check scripts/build-android-assets.mjs",
+    "check": "node scripts/check.mjs",
     "preview": "node scripts/preview.mjs",
     "build:android-assets": "node scripts/build-android-assets.mjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20.11"
   }
 }

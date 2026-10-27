@@ -3,10 +3,11 @@ name: Build and test
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -15,22 +16,7 @@ jobs:
       - name: Check out sources
         uses: actions/checkout@v4
         with:
-          persist-credentials: true
-
-      - name: Restore the app source tree on first run
-        shell: bash
-        run: |
-          if [ ! -f src/app.js ]; then
-            cat bootstrap/chunk-*.b64 | tr -d '\r\n ' | base64 --decode > "$RUNNER_TEMP/Multi-HF-source.zip"
-            unzip -t "$RUNNER_TEMP/Multi-HF-source.zip"
-            unzip -oq "$RUNNER_TEMP/Multi-HF-source.zip" -d .
-            rm -rf bootstrap
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add -A
-            git commit -m "build: bootstrap Multi-HF source project"
-            git push origin HEAD:main
-          fi
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v4

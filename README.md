@@ -7,14 +7,16 @@ A dependency-free, local-first web workbench for Hugging Face Spaces using Gradi
 - Add a Space by `owner/name` or URL and discover its Gradio endpoints from `/config`.
 - Render text, number, slider, checkbox, choice, and file inputs from the live schema.
 - Store profiles and jobs in browser storage; export/import the workspace as JSON.
-- Connect Hugging Face tokens for the current browser session. Tokens are held in memory only and are not included in exports or persisted storage.
+- Connect Hugging Face tokens for the current browser session. Tokens are held in memory only and are not included in exports or persisted storage. A token is only sent to `huggingface.co`, and to a `*.hf.space` host only when the Hub reports that Space as private; public Spaces never receive it.
 - Run queued generation jobs, show returned image/video/audio/file outputs, and download results.
 - Classify auth, waking, transient, quota, policy, and fatal failures. Quota failures pause that job and do not invent a reset time or automatically rotate accounts to work around limits.
+- Waking and transient failures retry automatically up to twice on the same Space and account (with backoff); after that the job pauses. Requests time out after 15 minutes, and a running job can be cancelled.
+- Workspace import is validated: hosts must be `https://*.hf.space`, results must be `https`/`data:` media, and imported jobs left running are paused.
 - Static build with Node.js only. GitHub Actions runs the same build and test commands.
 
 ## Run locally
 
-Requires Node.js 20 or newer; no `npm install` is needed. This repo also includes an Android APK shell that hosts the same interface in a WebView; the interface logic is shared with the PWA.
+Requires Node.js 20.11 or newer; no `npm install` is needed. This repo also includes an Android APK shell that hosts the same interface in a WebView; the interface logic is shared with the PWA.
 
 ```sh
 npm run check

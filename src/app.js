@@ -1,6 +1,6 @@
 import {
   parseSpaceInput, normalizeHost, parseSpaceConfig, taskFromEndpoints, classifyFailure,
-  holdFor, normalizeOutputs, safeId,
+  holdFor, normalizeOutputs, safeId, tokenHeaders, persistableResult, recoverRunningJobs, sanitizeWorkspace, readGradioStream,
 } from "./lib/core.js";
 
 const STORAGE_KEY = "multi-hf.workspace.v1";
@@ -17,7 +17,12 @@ const jobFiles = new Map();
 let currentTab = "queue";
 let queueBusy = false;
 let queueHalted = false;
+let currentAbort = null;
 let toastTimer;
+let saveTimer;
+const GEN_TIMEOUT_MS = 15 * 60 * 1000;
+const META_TIMEOUT_MS = 30 * 1000;
+const MAX_AUTO_RETRIES = 2;
 
 function readWorkspace() {
   try {
@@ -25,7 +30,7 @@ function readWorkspace() {
     return {
       models: Array.isArray(parsed.models) ? parsed.models : [],
       profiles: Array.isArray(parsed.profiles) ? parsed.profiles : [],
-      jobs: Array.isArray(parsed.jobs) ? parsed.jobs : [],
+      jobs: Array.isArray(parsed.jobs) ? recoverRunningJobs(parsed.jobs) : [],
       accounts: Array.isArray(parsed.accounts) ? parsed.accounts.map((a) => ({ ...a, connected: false })) : [],
       settings: { lastAccountId: "", ...(parsed.settings || {}) },
     };
@@ -44,13 +49,14 @@ function saveState() {
   const persisted = {
     models: state.models,
     profiles: state.profiles,
-    jobs: state.jobs.map(({ result, ...job }) => ({ ...job, result: Array.isArray(result) ? result : [] })),
+    jobs: state.jobs.map(({ result, ...job }) => ({ ...job, result: persistableResult(result) })),
     accounts: state.accounts.map(({ token, connected, ...account }) => ({ ...account, connected: false })),
     settings: state.settings,
   };
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted)); }
   catch (error) { showNotice(`Workspace storage is full. Export your data and remove old jobs. ${error.message}`, "error"); }
 }
+function saveStateSoon() { clearTimeout(saveTimer); saveTimer = setTimeout(saveState, 1000); }
 function ping(message) {
   toast.textContent = message;
   toast.classList.add("show");
@@ -100,13 +106,14 @@ function renderQueue() {
   const rows = state.jobs.filter((job) => job.status !== "done").slice().reverse().slice(0, 12);
   view.innerHTML = `
     <div class="stats">${stat("Pending jobs", ready, "Waiting to run")}${stat("Completed", done, "Finished successfully")}${stat("Paused", paused, "Needs a manual decision")}${stat("Failed", failed, "Review the error details")}</div>
-    <div class="section-head"><div><h2>Queue workspace</h2><p>Jobs run one at a time to keep Space state predictable.</p></div><div class="inline-actions"><button class="button button-quiet" id="queue-pause" ${queueBusy ? "" : "disabled"}>Pause queue</button><button class="button button-primary" id="queue-run" ${queueBusy || !ready ? "disabled" : ""}>▶ Run queue</button></div></div>
+    <div class="section-head"><div><h2>Queue workspace</h2><p>Jobs run one at a time to keep Space state predictable.</p></div><div class="inline-actions"><button class="button button-quiet" id="queue-pause" ${queueBusy ? "" : "disabled"}>Pause queue</button><button class="button button-quiet" id="queue-cancel" ${queueBusy ? "" : "disabled"}>Cancel running job</button><button class="button button-primary" id="queue-run" ${queueBusy || !ready ? "disabled" : ""}>▶ Run queue</button></div></div>
     <div class="panel"><div class="panel-head"><div><h2>Upcoming & active</h2><div class="subtext">${queueBusy ? "A job is currently running." : queueHalted ? "Queue is paused after a quota/resource failure." : "Ready when you are."}</div></div><button class="button button-sm" id="queue-add">＋ Add job</button></div>
     ${rows.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>Job</th><th>Space</th><th>Status</th><th>Updated</th><th>Action</th></tr></thead><tbody>${rows.map(jobRow).join("")}</tbody></table></div>` : `<div class="empty"><div class="empty-mark">▦</div><strong>Your queue is clear</strong><p>Add a Hugging Face Space, create a profile, and enqueue a generation job. Results and queue state stay in this browser.</p><button class="button button-primary" id="queue-empty-add">＋ Create first job</button></div>`}</div>
     <div class="section-head"><div><h2>Latest results</h2><p>Open a completed job to view its output gallery.</p></div><button class="button button-quiet button-sm" data-goto="jobs">View all jobs ↗</button></div>
     ${renderRecentResults()}`;
   document.querySelector("#queue-run")?.addEventListener("click", () => runQueue());
   document.querySelector("#queue-pause")?.addEventListener("click", () => { queueHalted = true; ping("Queue paused. The active request may finish before stopping."); });
+  document.querySelector("#queue-cancel")?.addEventListener("click", () => { queueHalted = true; currentAbort?.abort(); ping("Cancelling the active request. The Space may still finish on its side."); });
   ["queue-add", "queue-empty-add"].forEach((id) => document.querySelector(`#${id}`)?.addEventListener("click", () => openNewJob()));
   bindJobActions();
   document.querySelectorAll("[data-goto]").forEach((button) => button.addEventListener("click", () => { currentTab = button.dataset.goto; render(); }));
@@ -168,7 +175,7 @@ function bindJobActions() {
   document.querySelectorAll("[data-job-retry]").forEach((button) => button.addEventListener("click", () => {
     const job = state.jobs.find((item) => item.id === button.dataset.jobRetry);
     if (!job) return;
-    job.status = "retry"; job.error = ""; job.updatedAt = Date.now(); job.quotaResetAt = null; queueHalted = false; saveState(); render(); ping("Job queued for manual retry.");
+    job.status = "retry"; job.error = ""; job.attempts = 0; job.updatedAt = Date.now(); job.quotaResetAt = null; queueHalted = false; saveState(); render(); ping("Job queued for manual retry.");
   }));
 }
 function openAccountDialog(existing = null) {
@@ -210,12 +217,25 @@ function openAddSpace() {
     catch (error) { submit.disabled = false; submit.textContent = "Discover Space"; ping(error.message || "Space discovery failed."); }
   });
 }
-async function authHeaders(accountId = "") {
+// Tokens only go to huggingface.co, or to a *.hf.space host the Hub reported as private.
+function authHeaders(accountId, url, privateSpace = false) {
   const token = accountId ? accountTokens.get(accountId) : null;
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  return tokenHeaders(token, url, { privateSpace });
 }
+function withTimeout(ms, parent) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  const onAbort = () => controller.abort();
+  if (parent) { if (parent.aborted) controller.abort(); else parent.addEventListener("abort", onAbort, { once: true }); }
+  return { signal: controller.signal, done() { clearTimeout(timer); parent?.removeEventListener("abort", onAbort); } };
+}
+const isAbortError = (error) => error?.name === "AbortError" || error?.name === "TimeoutError";
 async function fetchJson(url, options = {}, failureMessage = "Request failed") {
-  const response = await fetch(url, options);
+  const timer = withTimeout(META_TIMEOUT_MS);
+  let response;
+  try { response = await fetch(url, { ...options, signal: timer.signal }); }
+  catch (error) { timer.done(); throw isAbortError(error) ? new Error(`${failureMessage}: the request timed out.`) : error; }
+  timer.done();
   if (!response.ok) {
     let message = ""; try { const body = await response.json(); message = body?.error || body?.detail || body?.message || ""; } catch { try { message = (await response.text()).slice(0, 500); } catch {} }
     const error = new Error(message || `${failureMessage} (HTTP ${response.status})`); error.status = response.status; throw error;
@@ -227,13 +247,13 @@ async function discoverSpace(modelId = null, options = {}) {
   const prior = modelId ? getModel(modelId) : null;
   const ref = options.ref || prior?.ref || prior?.host || modelId;
   const accountId = options.accountId || prior?.accountId || state.settings.lastAccountId || "";
-  const headers = await authHeaders(accountId);
   let parsedInput = parseSpaceInput(ref);
   let host = parsedInput.host;
   let resolvedId = parsedInput.id;
   let apiData = null;
   if (resolvedId) {
-    apiData = await fetchJson(`https://huggingface.co/api/spaces/${resolvedId.split("/").map(encodeURIComponent).join("/")}`, { headers }, "Space metadata request failed");
+    const hubUrl = `https://huggingface.co/api/spaces/${resolvedId.split("/").map(encodeURIComponent).join("/")}`;
+    apiData = await fetchJson(hubUrl, { headers: authHeaders(accountId, hubUrl) }, "Space metadata request failed");
     host = normalizeHost(apiData.host, apiData.subdomain || apiData.cardData?.subdomain);
     if (!host && apiData.runtime?.stage && typeof apiData.subdomain === "string") host = normalizeHost(null, apiData.subdomain);
     if (!host) throw new Error("Hugging Face did not return a Space host. Check that the Space exists and is accessible.");
@@ -241,7 +261,7 @@ async function discoverSpace(modelId = null, options = {}) {
   if (!host) throw new Error("Could not resolve the Space's public host.");
   let config; let configError;
   for (const suffix of ["/config", "/gradio_api/config"]) {
-    try { config = await fetchJson(`${host}${suffix}`, { headers }, "Could not read the Gradio config"); break; }
+    try { config = await fetchJson(`${host}${suffix}`, { headers: authHeaders(accountId, `${host}${suffix}`, apiData?.private === true) }, "Could not read the Gradio config"); break; }
     catch (error) { configError = error; if (error.status !== 404 && error.status !== 405) break; }
   }
   if (!config) throw new Error(`${configError?.message || "Could not read this Space's Gradio config."} If this Space is private, connect a token; if browser access is blocked, use a browser with compatible CORS permissions.`);
@@ -252,7 +272,7 @@ async function discoverSpace(modelId = null, options = {}) {
     id, kind: "space", ref: resolvedId || prior?.ref || "", host,
     title: name || schema.title || apiData?.cardData?.title || resolvedId || host,
     task: taskFromEndpoints(schema.endpoints), apiPrefix: schema.apiPrefix,
-    endpoints: schema.endpoints, activeApi: schema.endpoints[0]?.apiName || "", accountId,
+    endpoints: schema.endpoints, activeApi: schema.endpoints[0]?.apiName || "", accountId, private: apiData?.private === true,
     hardware: apiData?.runtime?.hardware?.current || apiData?.runtime?.hardware || "Unknown", fetchedAt: Date.now(), note: name,
   };
   const existingIndex = state.models.findIndex((item) => item.id === id || item.host === host);
@@ -364,26 +384,26 @@ function openJobDetails(jobId) {
     <div class="field-grid"><div><div class="label">Status</div><p>${statusBadge(job.status)}</p></div><div><div class="label">Last updated</div><p class="card-meta">${escapeHtml(fmtDate(job.updatedAt))}</p></div><div class="field full"><label>Error / event details</label><div class="panel-body" style="border:1px solid var(--line);border-radius:8px;white-space:pre-wrap;word-break:break-word">${escapeHtml(job.error || "No error recorded.")}</div></div></div>
     <div class="section-head"><div><h2>Output gallery</h2><p>${result.length} normalized output item${result.length === 1 ? "" : "s"}</p></div></div>${renderResults(result)}
     <div class="form-actions"><button class="button" type="button" data-close>Close</button>${["failed", "paused"].includes(job.status) ? `<button class="button button-primary" id="detail-retry">Retry job</button>` : ""}<button class="button" id="detail-clone">Clone job</button></div>`);
-  document.querySelector("#detail-retry")?.addEventListener("click", () => { job.status = "retry"; job.error = ""; job.updatedAt = Date.now(); queueHalted = false; saveState(); dialog.close(); currentTab = "queue"; render(); ping("Job marked for retry."); });
+  document.querySelector("#detail-retry")?.addEventListener("click", () => { job.status = "retry"; job.error = ""; job.attempts = 0; job.updatedAt = Date.now(); queueHalted = false; saveState(); dialog.close(); currentTab = "queue"; render(); ping("Job marked for retry."); });
   document.querySelector("#detail-clone")?.addEventListener("click", () => { const profile = { modelId: job.modelId, apiName: job.apiName, values: job.values, accountId: job.accountId, name: job.name }; dialog.close(); openNewJob(job.modelId, profile); });
 }
 function renderResults(result) {
   if (!result.length) return `<div class="panel"><div class="empty"><div class="empty-mark">◫</div><strong>No media output to show</strong><p>Once the endpoint returns outputs, they will be shown here.</p></div></div>`;
   return `<div class="result-grid">${result.map((item) => {
     const label = escapeHtml(item.label || "Output");
-    if (item.kind === "image" && item.url) return `<div class="result-item"><a href="${escapeHtml(item.url)}" target="_blank" rel="noopener"><img loading="lazy" src="${escapeHtml(item.url)}" alt="${label}"></a><div class="result-caption">${label} · <a href="${escapeHtml(item.url)}" download>Download</a></div></div>`;
-    if (item.kind === "video" && item.url) return `<div class="result-item"><video controls preload="metadata" src="${escapeHtml(item.url)}"></video><div class="result-caption">${label} · <a href="${escapeHtml(item.url)}" download>Download</a></div></div>`;
-    if (item.kind === "audio" && item.url) return `<div class="result-item"><audio controls preload="metadata" src="${escapeHtml(item.url)}"></audio><div class="result-caption">${label} · <a href="${escapeHtml(item.url)}" download>Download</a></div></div>`;
+    if (item.kind === "image" && item.url) return `<div class="result-item"><a href="${escapeHtml(item.url)}" target="_blank" rel="noopener"><img loading="lazy" src="${escapeHtml(item.url)}" alt="${label}"></a><div class="result-caption">${label} · <a href="${escapeHtml(item.url)}" download target="_blank" rel="noopener">Download</a></div></div>`;
+    if (item.kind === "video" && item.url) return `<div class="result-item"><video controls preload="metadata" src="${escapeHtml(item.url)}"></video><div class="result-caption">${label} · <a href="${escapeHtml(item.url)}" download target="_blank" rel="noopener">Download</a></div></div>`;
+    if (item.kind === "audio" && item.url) return `<div class="result-item"><audio controls preload="metadata" src="${escapeHtml(item.url)}"></audio><div class="result-caption">${label} · <a href="${escapeHtml(item.url)}" download target="_blank" rel="noopener">Download</a></div></div>`;
     if (item.url) return `<div class="result-item"><div class="result-caption">${label}<br><a href="${escapeHtml(item.url)}" target="_blank" rel="noopener">Open or download file ↗</a></div></div>`;
     return `<div class="result-item"><div class="result-caption"><strong>${label}</strong><pre style="white-space:pre-wrap;overflow-wrap:anywhere;color:#d9e3f1">${escapeHtml(item.text || "")}</pre></div></div>`;
   }).join("")}</div>`;
 }
-async function uploadFile(file, host, apiPrefix, headers) {
+async function uploadFile(file, host, apiPrefix, headers, signal) {
   const form = new FormData(); form.append("files", file, file.name);
   let lastError;
   for (const url of [`${host}${apiPrefix}/upload`, `${host}/upload`]) {
     try {
-      const response = await fetch(url, { method: "POST", headers, body: form });
+      const response = await fetch(url, { method: "POST", headers, body: form, signal });
       if (!response.ok) { const err = new Error(`Upload failed (HTTP ${response.status})`); err.status = response.status; throw err; }
       const body = await response.json();
       const path = Array.isArray(body) ? body[0] : body?.path || body?.files?.[0]?.path || body?.[0]?.path;
@@ -393,34 +413,7 @@ async function uploadFile(file, host, apiPrefix, headers) {
   }
   throw lastError || new Error("Could not upload file input.");
 }
-function parseSseEvents(response, onProgress) {
-  const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ""; let lastData = null;
-  return (async () => {
-    while (true) {
-      const { value, done } = await reader.read();
-      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-      const blocks = buffer.split("\n\n"); buffer = blocks.pop() || "";
-      for (const block of blocks) {
-        const lines = block.split(/\r?\n/); let event = "message"; const dataLines = [];
-        for (const line of lines) { if (line.startsWith("event:")) event = line.slice(6).trim(); else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim()); }
-        if (!dataLines.length) continue;
-        const dataText = dataLines.join("\n");
-        if (dataText === "[DONE]") return lastData;
-        let payload; try { payload = JSON.parse(dataText); } catch { payload = { raw: dataText }; }
-        if (event === "error" || payload?.msg === "unexpected_error" || payload?.success === false) throw new Error(payload?.message || payload?.error || payload?.raw || "Gradio endpoint returned an error.");
-        if (["process_completed", "complete", "success"].includes(event) || payload?.is_generating === false && payload?.data) {
-          lastData = payload?.output?.data ?? payload?.data ?? payload;
-          if (event === "process_completed" || payload?.success !== false) return lastData;
-        }
-        if (event === "process_generating" || event === "heartbeat" || event === "estimation") onProgress?.(payload);
-      }
-      if (done) break;
-    }
-    if (lastData != null) return lastData;
-    throw new Error("Gradio stream ended before a completed output was received.");
-  })();
-}
-async function callGradio(model, endpoint, values, job, headers) {
+async function callGradio(model, endpoint, values, job, headers, signal) {
   const data = [];
   const files = jobFiles.get(job.id) || new Map();
   for (const field of endpoint.fields) {
@@ -428,8 +421,8 @@ async function callGradio(model, endpoint, values, job, headers) {
     let value = values[field.key];
     if (["image", "video", "audio", "file"].includes(field.type)) {
       const file = files.get(field.key);
-      if (file) value = await uploadFile(file, model.host, model.apiPrefix || "/gradio_api", headers);
-      else if (value?.path || value?.url) value = value;
+      if (file) value = await uploadFile(file, model.host, model.apiPrefix || "/gradio_api", headers, signal);
+      else if (value?.path || value?.url) { /* already-uploaded file reference: send as is */ }
       else if (value?.name) throw new Error(`File “${value.name}” is not available in memory. Reattach it by cloning the job before retrying.`);
       else value = null;
     }
@@ -440,22 +433,22 @@ async function callGradio(model, endpoint, values, job, headers) {
   const prefix = model.apiPrefix || "/gradio_api";
   let response;
   try {
-    response = await fetch(`${model.host}${prefix}/call/${api}`, { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify({ data, session_hash: sessionHash }) });
-  } catch (error) { throw new Error(`Could not reach the Space. Check its availability and browser CORS settings. ${error.message}`); }
+    response = await fetch(`${model.host}${prefix}/call/${api}`, { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify({ data, session_hash: sessionHash }), signal });
+  } catch (error) { if (isAbortError(error)) throw error; throw new Error(`Could not reach the Space. Check its availability and browser CORS settings. ${error.message}`); }
   if (response.ok) {
     let initial;
     try { initial = await response.json(); } catch {}
     if (initial?.event_id) {
-      const stream = await fetch(`${model.host}${prefix}/call/${api}/${encodeURIComponent(initial.event_id)}`, { headers });
+      const stream = await fetch(`${model.host}${prefix}/call/${api}/${encodeURIComponent(initial.event_id)}`, { headers, signal });
       if (!stream.ok) { const text = (await stream.text()).slice(0, 600); const err = new Error(text || `Result stream failed (HTTP ${stream.status})`); err.status = stream.status; throw err; }
-      return await parseSseEvents(stream, (payload) => { job.progress = typeof payload?.progress === "number" ? payload.progress : job.progress; job.updatedAt = Date.now(); saveState(); });
+      return await readGradioStream(stream, (payload) => { job.progress = typeof payload?.progress === "number" ? payload.progress : job.progress; job.updatedAt = Date.now(); saveStateSoon(); });
     }
     if (initial?.data) return initial.data;
     if (initial?.output?.data) return initial.output.data;
   }
   // Older Gradio builds expose the synchronous run endpoint instead of /call.
   if ([404, 405, 501].includes(response.status)) {
-    const fallback = await fetch(`${model.host}${prefix}/run/${api}`, { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify({ data, session_hash: sessionHash }) });
+    const fallback = await fetch(`${model.host}${prefix}/run/${api}`, { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify({ data, session_hash: sessionHash }), signal });
     if (!fallback.ok) { const message = (await fallback.text()).slice(0, 700); const err = new Error(message || `Generation failed (HTTP ${fallback.status})`); err.status = fallback.status; throw err; }
     const output = await fallback.json();
     if (output?.error) throw new Error(typeof output.error === "string" ? output.error : JSON.stringify(output.error));
@@ -463,6 +456,13 @@ async function callGradio(model, endpoint, values, job, headers) {
   }
   const message = response.ok ? "Gradio did not return an event id or output." : (await response.text()).slice(0, 700);
   const error = new Error(message || `Generation failed (HTTP ${response.status})`); error.status = response.status; throw error;
+}
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Wait for `ms`, waking early if the user pauses the queue. Returns false when paused.
+async function waitUnlessHalted(ms) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { if (queueHalted) return false; await sleep(Math.min(250, end - Date.now())); }
+  return !queueHalted;
 }
 async function runQueue() {
   if (queueBusy) return;
@@ -473,6 +473,8 @@ async function runQueue() {
       if (!job) break;
       const model = getModel(job.modelId); const endpoint = endpointFor(model, job.apiName);
       if (!model || !endpoint) { job.status = "failed"; job.error = "Saved Space or endpoint was removed. Rediscover the Space and clone the job."; job.updatedAt = Date.now(); saveState(); continue; }
+      const host = normalizeHost(model.host);
+      if (!host) { job.status = "failed"; job.error = "Saved Space host is not a valid *.hf.space address. Rediscover the Space and clone the job."; job.updatedAt = Date.now(); saveState(); continue; }
       if (!jobFiles.has(job.id) && (job.files || []).length) {
         const missing = (job.files || []).some((key) => job.values?.[key]?.name);
         if (missing) { job.status = "paused"; job.error = "Local file inputs are no longer in memory. Clone this job and reattach files before retrying."; job.updatedAt = Date.now(); saveState(); continue; }
@@ -481,22 +483,36 @@ async function runQueue() {
         job.status = "paused"; job.error = "The selected account is not connected in this browser session. Connect it and retry this job."; job.updatedAt = Date.now(); saveState(); continue;
       }
       job.status = "running"; job.error = ""; job.progress = 0; job.startedAt = Date.now(); job.updatedAt = Date.now(); saveState(); render();
+      currentAbort = new AbortController();
+      const timer = withTimeout(GEN_TIMEOUT_MS, currentAbort.signal);
       try {
-        const headers = await authHeaders(job.accountId);
-        const raw = await callGradio(model, endpoint, job.values || {}, job, headers);
-        job.result = normalizeOutputs(raw, "Output", model.host);
-        job.status = "done"; job.error = ""; job.finishedAt = Date.now(); job.updatedAt = Date.now(); job.progress = 1; saveState(); ping(`Completed: ${job.name || model.title}`);
+        const headers = authHeaders(job.accountId, host, model.private === true);
+        const raw = await callGradio({ ...model, host }, endpoint, job.values || {}, job, headers, timer.signal);
+        job.result = normalizeOutputs(raw, "Output", host);
+        job.status = "done"; job.error = ""; job.attempts = 0; job.finishedAt = Date.now(); job.updatedAt = Date.now(); job.progress = 1; saveState(); ping(`Completed: ${job.name || model.title}`);
       } catch (error) {
-        const kind = classifyFailure(error.status, error.message || String(error));
-        const reset = error?.resetAt || null;
-        const until = holdFor(kind, error.message || "", reset);
-        job.error = `[${kind.toUpperCase()}] ${error.message || String(error)}`; job.updatedAt = Date.now();
-        if (kind === "quota") {
+        const cancelled = currentAbort.signal.aborted;
+        const timedOut = !cancelled && isAbortError(error);
+        const message = timedOut ? `Request timed out after ${Math.round(GEN_TIMEOUT_MS / 60000)} minutes.` : (error.message || String(error));
+        const kind = cancelled ? "cancelled" : classifyFailure(error.status, message);
+        const until = holdFor(kind, message, error?.resetAt || null);
+        job.error = `[${kind.toUpperCase()}] ${cancelled ? "Cancelled by you. Retry when ready." : message}`; job.updatedAt = Date.now();
+        if (cancelled) {
+          job.status = "paused"; queueHalted = true;
+        } else if (kind === "quota") {
           job.status = "paused"; job.quotaResetAt = until; queueHalted = true;
           showNotice("Quota/resource exhaustion detected. The job and queue are paused. No reset time was guessed and no other account was selected automatically.", "error");
+        } else if ((kind === "waking" || kind === "transient") && (job.attempts || 0) < MAX_AUTO_RETRIES && !queueHalted) {
+          // Bounded retry on the same Space and account: no rotation, no limit evasion.
+          const delay = Math.min(3 * 60 * 1000, until ? Math.max(0, until - Date.now()) : 5000 * 3 ** (job.attempts || 0));
+          job.attempts = (job.attempts || 0) + 1; job.status = "retry";
+          job.error += ` — automatic retry ${job.attempts}/${MAX_AUTO_RETRIES} in ${Math.ceil(delay / 1000)}s.`;
+          saveState(); render();
+          await waitUnlessHalted(delay);
+          continue;
         } else if (kind === "waking" || kind === "transient") {
           job.status = "paused"; queueHalted = true;
-          showNotice(`${kind === "waking" ? "The Space appears to be waking or loading." : "A transient/network error interrupted this job."} It is paused for a manual retry.`, "error");
+          showNotice(`${kind === "waking" ? "The Space appears to be waking or loading." : "A transient/network error interrupted this job."} Automatic retries are used up; it is paused for a manual retry.`, "error");
         } else if (kind === "auth") {
           job.status = "paused"; queueHalted = true;
           showNotice("Authentication failed. Check the selected account token and retry manually; account switching is not automatic.", "error");
@@ -505,7 +521,7 @@ async function runQueue() {
           if (kind === "policy") showNotice("The Space refused the request under its policy/safety rules. Review the prompt and the Space's own terms before retrying.", "error");
         }
         saveState();
-      }
+      } finally { timer.done(); currentAbort = null; }
       render();
       if (queueHalted) break;
     }
@@ -519,10 +535,9 @@ function exportWorkspace() {
   const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = `multi-hf-workspace-${new Date().toISOString().slice(0, 10)}.json`; a.click(); URL.revokeObjectURL(url); ping("Workspace exported. Account tokens are excluded.");
 }
 function importWorkspace(data) {
-  const imported = data?.workspace || data;
-  if (!imported || !Array.isArray(imported.models) || !Array.isArray(imported.jobs) || !Array.isArray(imported.profiles)) throw new Error("This file is not a Multi-HF workspace export.");
-  if (!confirm("Import this workspace and replace the current models, profiles, jobs, and account labels? Tokens will not be imported.")) return;
-  state = { models: imported.models, profiles: imported.profiles, jobs: imported.jobs, accounts: (imported.accounts || []).map((a) => ({ ...a, connected: false })), settings: imported.settings || { lastAccountId: "" } };
+  const imported = sanitizeWorkspace(data);
+  if (!confirm(`Import ${imported.models.length} Space(s), ${imported.profiles.length} profile(s) and ${imported.jobs.length} job(s), replacing the current workspace? Tokens are never imported.`)) return;
+  state = imported;
   accountTokens.clear(); jobFiles.clear(); saveState(); render(); ping("Workspace imported. Reconnect accounts to use private Spaces.");
 }
 document.querySelectorAll("[data-tab]").forEach((button) => button.addEventListener("click", () => { currentTab = button.dataset.tab; render(); }));
@@ -539,4 +554,4 @@ document.addEventListener("keydown", (event) => { if ((event.ctrlKey || event.me
 
 render();
 
-if ("serviceWorker" in navigator && location.protocol !== "file:") navigator.serviceWorker.register("/service-worker.js").catch(() => {});
+if ("serviceWorker" in navigator && location.protocol !== "file:") navigator.serviceWorker.register("./service-worker.js").catch(() => {});
