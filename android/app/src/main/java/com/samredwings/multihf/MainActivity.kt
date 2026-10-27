@@ -23,8 +23,10 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Map the packaged assets root to the same URL paths used by index.html
+        // (for example /src/app.js and /src/styles.css).
         assetLoader = WebViewAssetLoader.Builder()
-            .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
+            .addPathHandler("/", WebViewAssetLoader.AssetsPathHandler(this))
             .build()
         webView = WebView(this)
         webView.layoutParams = ViewGroup.LayoutParams(
@@ -82,7 +84,7 @@ class MainActivity : Activity() {
         }
         setContentView(webView)
         if (savedInstanceState == null) {
-            webView.loadUrl("https://$appHost/assets/www/index.html")
+            webView.loadUrl("https://$appHost/index.html")
         } else {
             webView.restoreState(savedInstanceState)
         }
