@@ -1,6 +1,5 @@
 package com.samredwings.multihf
 
-import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
@@ -12,17 +11,29 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.webkit.WebViewAssetLoader
 
-class MainActivity : Activity() {
+class MainActivity : ComponentActivity() {
     private lateinit var webView: WebView
     private lateinit var assetLoader: WebViewAssetLoader
     private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
-    private val fileRequestCode = 7431
     private val appHost = "appassets.androidplatform.net"
+    private val filePicker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val selected = if (result.resultCode == RESULT_OK) result.data?.data?.let { arrayOf(it) } else null
+        fileChooserCallback?.onReceiveValue(selected)
+        fileChooserCallback = null
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (::webView.isInitialized && webView.canGoBack()) webView.goBack() else finish()
+            }
+        })
         // Map the packaged assets root to the same URL paths used by index.html
         // (for example /src/app.js and /src/styles.css).
         assetLoader = WebViewAssetLoader.Builder()
@@ -35,7 +46,6 @@ class MainActivity : Activity() {
         )
         webView.settings.javaScriptEnabled = true
         webView.settings.domStorageEnabled = true
-        webView.settings.databaseEnabled = true
         webView.settings.allowFileAccess = false
         webView.settings.allowContentAccess = true
         webView.settings.javaScriptCanOpenWindowsAutomatically = false
@@ -74,7 +84,7 @@ class MainActivity : Activity() {
                     putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "video/*", "audio/*", "application/octet-stream"))
                 }
                 return try {
-                    startActivityForResult(intent, fileRequestCode)
+                    filePicker.launch(intent)
                     true
                 } catch (_: ActivityNotFoundException) {
                     this@MainActivity.fileChooserCallback = null
@@ -99,24 +109,9 @@ class MainActivity : Activity() {
         }
     }
 
-    @Deprecated("Uses Activity result callback for broad Android compatibility")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == fileRequestCode) {
-            val result = if (resultCode == RESULT_OK && data?.data != null) arrayOf(data.data!!) else null
-            fileChooserCallback?.onReceiveValue(result)
-            fileChooserCallback = null
-        }
-    }
-
     override fun onSaveInstanceState(outState: Bundle) {
         webView.saveState(outState)
         super.onSaveInstanceState(outState)
-    }
-
-    @Deprecated("Uses platform back dispatch for broad Android compatibility")
-    override fun onBackPressed() {
-        if (::webView.isInitialized && webView.canGoBack()) webView.goBack() else super.onBackPressed()
     }
 
     override fun onDestroy() {

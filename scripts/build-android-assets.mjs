@@ -3,7 +3,9 @@ import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 const root = resolve(import.meta.dirname, "..");
 const run = (command, args) => {
-  const result = spawnSync(command, args, { cwd: root, stdio: "inherit", shell: process.platform === "win32" });
+  // Keep shell execution disabled: process.execPath may contain spaces on Windows,
+  // and spawnSync already handles executable paths without shell quoting.
+  const result = spawnSync(command, args, { cwd: root, stdio: "inherit" });
   if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} failed.`);
 };
 run(process.execPath, ["scripts/build.mjs"]);

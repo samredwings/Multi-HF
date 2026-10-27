@@ -2,5 +2,10 @@ node_modules/
 dist/
 .env*
 .DS_Store
+/work/
 
 android/app/src/main/assets/
+android/.gradle/
+android/.kotlin/
+android/build/
+android/app/build/
