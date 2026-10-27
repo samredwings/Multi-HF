@@ -151,10 +151,16 @@ function renderJobs() {
 }
 function renderModels() {
   view.innerHTML = `<div class="section-head"><div><h2>Connected Spaces</h2><p>Discover Gradio endpoints from each Space's live configuration.</p></div><button class="button button-primary" id="models-add">＋ Add Space</button></div>
-  ${state.models.length ? `<div class="card-grid">${state.models.map((model) => `<article class="model-card"><div class="inline-actions"><span class="badge ${model.task === "video" ? "running" : ""}">${escapeHtml(model.task.toUpperCase())}</span><span class="badge">${model.endpoints.length} endpoints</span></div><div class="card-title" style="margin-top:12px">${escapeHtml(model.title)}</div><div class="card-meta">${escapeHtml(model.ref || model.host)}<br>Updated ${escapeHtml(timeAgo(model.fetchedAt))}</div><div class="card-actions"><button class="button button-primary button-sm" data-model-new="${escapeHtml(model.id)}">Create job</button><button class="button button-sm" data-model-refresh="${escapeHtml(model.id)}">Refresh schema</button><a class="button button-sm" href="${escapeHtml(model.ref ? `https://huggingface.co/spaces/${model.ref}` : model.host)}" target="_blank" rel="noopener">Open Space ↗</a><button class="button button-danger button-sm" data-model-remove="${escapeHtml(model.id)}">Remove</button></div></article>`).join("")}</div>` : `<div class="panel"><div class="empty"><div class="empty-mark">◇</div><strong>Add your first Space</strong><p>Enter a Hugging Face Space ID such as <span class="kbd">owner/name</span> or its public URL. Multi-HF reads the live Gradio schema and creates a dynamic generation form.</p><button class="button button-primary" id="models-empty-add">＋ Discover Space</button></div></div>`}`;
+  ${state.models.length ? `<div class="card-grid">${state.models.map((model) => `<article class="model-card"><div class="inline-actions"><span class="badge ${model.task === "video" ? "running" : ""}">${escapeHtml(model.task.toUpperCase())}</span><span class="badge">${model.endpoints.length} endpoints</span></div><div class="card-title" style="margin-top:12px">${escapeHtml(model.title)}</div><div class="card-meta">${escapeHtml(model.ref || model.host)}<br>Updated ${escapeHtml(timeAgo(model.fetchedAt))}</div><div class="card-actions"><button class="button button-primary button-sm" data-model-new="${escapeHtml(model.id)}">Create job</button><button class="button button-sm" data-model-refresh="${escapeHtml(model.id)}">Refresh schema</button><button class="button button-sm" data-model-token="${escapeHtml(model.id)}">Token: ${model.sendToken || model.private ? "sent" : "not sent"}</button><a class="button button-sm" href="${escapeHtml(model.ref ? `https://huggingface.co/spaces/${model.ref}` : model.host)}" target="_blank" rel="noopener">Open Space ↗</a><button class="button button-danger button-sm" data-model-remove="${escapeHtml(model.id)}">Remove</button></div></article>`).join("")}</div>` : `<div class="panel"><div class="empty"><div class="empty-mark">◇</div><strong>Add your first Space</strong><p>Enter a Hugging Face Space ID such as <span class="kbd">owner/name</span> or its public URL. Multi-HF reads the live Gradio schema and creates a dynamic generation form.</p><button class="button button-primary" id="models-empty-add">＋ Discover Space</button></div></div>`}`;
   document.querySelector("#models-add")?.addEventListener("click", () => openAddSpace());
   document.querySelector("#models-empty-add")?.addEventListener("click", () => openAddSpace());
   document.querySelectorAll("[data-model-new]").forEach((button) => button.addEventListener("click", () => openNewJob(button.dataset.modelNew)));
+  document.querySelectorAll("[data-model-token]").forEach((button) => button.addEventListener("click", () => {
+    const model = getModel(button.dataset.modelToken); if (!model) return;
+    if (model.private) { ping("This Space is private, so your token is always sent to it."); return; }
+    if (!model.sendToken && !confirm("Send your selected account's token to this Space? Its owner can see it. Use a fine-grained read-only token.")) return;
+    model.sendToken = !model.sendToken; saveState(); render();
+  }));
   document.querySelectorAll("[data-model-refresh]").forEach((button) => button.addEventListener("click", () => discoverSpace(button.dataset.modelRefresh)));
   document.querySelectorAll("[data-model-remove]").forEach((button) => button.addEventListener("click", () => {
     const id = button.dataset.modelRemove;
@@ -224,11 +230,11 @@ function openAccountDialog(existing = null) {
 function openAddSpace() {
   const accounts = [{ id: "", label: "Public / no token" }, ...connectedAccounts().map((a) => ({ id: a.id, label: a.label }))];
   showDialog(`${dialogHeader("Discover a Hugging Face Space", "Multi-HF reads the live Gradio /config schema and builds an endpoint form.")}
-  <form id="space-form"><div class="field-grid"><div class="field full"><label for="space-ref">Space URL or owner/name</label><input id="space-ref" name="ref" required placeholder="owner/space-name or https://huggingface.co/spaces/owner/name"><small>Public Spaces work without a token. ${connectedAccounts().length ? "" : "For a private Space, first connect your token under Accounts. "}CORS or private-space permissions can still block browser access.</small></div><div class="field"><label for="space-account">Use account</label><select id="space-account" name="accountId">${accounts.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.label)}</option>`).join("")}</select></div><div class="field"><label for="space-note">Optional label</label><input id="space-note" name="note" maxlength="90" placeholder="My animation Space"></div></div><div class="form-actions"><button class="button" type="button" data-close>Cancel</button><button class="button button-primary" type="submit">Discover Space</button></div></form>`);
+  <form id="space-form"><div class="field-grid"><div class="field full"><label for="space-ref">Space URL or owner/name</label><input id="space-ref" name="ref" required placeholder="owner/space-name or https://huggingface.co/spaces/owner/name"><small>Public Spaces work without a token. ${connectedAccounts().length ? "" : "For a private Space, first connect your token under Accounts. "}CORS or private-space permissions can still block browser access.</small></div><div class="field"><label for="space-account">Use account</label><select id="space-account" name="accountId">${accounts.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.label)}</option>`).join("")}</select></div><div class="field"><label for="space-note">Optional label</label><input id="space-note" name="note" maxlength="90" placeholder="My animation Space"></div><div class="field full"><label class="inline-actions"><input type="checkbox" name="sendToken"> <span>Send my token to this Space (some GPU/ZeroGPU Spaces need it to use your quota)</span></label><small>Off by default. The Space's owner can see any token you send, so use a fine-grained read-only token.</small></div></div><div class="form-actions"><button class="button" type="button" data-close>Cancel</button><button class="button button-primary" type="submit">Discover Space</button></div></form>`);
   document.querySelector("#space-form").addEventListener("submit", async (event) => {
-    event.preventDefault(); const form = new FormData(event.currentTarget); const ref = String(form.get("ref") || "").trim(); const accountId = String(form.get("accountId") || ""); const note = String(form.get("note") || "").trim();
+    event.preventDefault(); const form = new FormData(event.currentTarget); const ref = String(form.get("ref") || "").trim(); const accountId = String(form.get("accountId") || ""); const note = String(form.get("note") || "").trim(); const sendToken = form.get("sendToken") === "on" && Boolean(accountId);
     const submit = event.currentTarget.querySelector("[type=submit]"); submit.disabled = true; submit.textContent = "Discovering…";
-    try { await discoverSpace(null, { ref, accountId, note }); dialog.close(); }
+    try { await discoverSpace(null, { ref, accountId, note, sendToken }); dialog.close(); }
     catch (error) { submit.disabled = false; submit.textContent = "Discover Space"; dialogError(error.message || "Space discovery failed."); }
   });
 }
@@ -276,7 +282,7 @@ async function discoverSpace(modelId = null, options = {}) {
   if (!host) throw new Error("Could not resolve the Space's public host.");
   let config; let configError;
   for (const suffix of ["/config", "/gradio_api/config"]) {
-    try { config = await fetchJson(`${host}${suffix}`, { headers: authHeaders(accountId, `${host}${suffix}`, apiData?.private === true) }, "Could not read the Gradio config"); break; }
+    try { config = await fetchJson(`${host}${suffix}`, { headers: authHeaders(accountId, `${host}${suffix}`, apiData?.private === true || options.sendToken === true || prior?.sendToken === true) }, "Could not read the Gradio config"); break; }
     catch (error) { configError = error; if (error.status !== 404 && error.status !== 405) break; }
   }
   if (!config) throw new Error(`${configError?.message || "Could not read this Space's Gradio config."} If this Space is private, connect a token; if browser access is blocked, use a browser with compatible CORS permissions.`);
@@ -287,7 +293,7 @@ async function discoverSpace(modelId = null, options = {}) {
     id, kind: "space", ref: resolvedId || prior?.ref || "", host,
     title: name || schema.title || apiData?.cardData?.title || resolvedId || host,
     task: taskFromEndpoints(schema.endpoints), apiPrefix: schema.apiPrefix,
-    endpoints: schema.endpoints, activeApi: schema.endpoints[0]?.apiName || "", accountId, private: apiData?.private === true,
+    endpoints: schema.endpoints, activeApi: schema.endpoints[0]?.apiName || "", accountId, private: apiData?.private === true, sendToken: options.sendToken ?? prior?.sendToken === true,
     hardware: apiData?.runtime?.hardware?.current || apiData?.runtime?.hardware || "Unknown", fetchedAt: Date.now(), note: name,
   };
   const existingIndex = state.models.findIndex((item) => item.id === id || item.host === host);
@@ -498,10 +504,11 @@ async function runQueue() {
         job.status = "paused"; job.error = "The selected account is not connected in this browser session. Connect it and retry this job."; job.updatedAt = Date.now(); saveState(); continue;
       }
       job.status = "running"; job.error = ""; job.progress = 0; job.startedAt = Date.now(); job.updatedAt = Date.now(); saveState(); render();
+      let tokenSent = false;
       currentAbort = new AbortController();
       const timer = withTimeout(GEN_TIMEOUT_MS, currentAbort.signal);
       try {
-        const headers = authHeaders(job.accountId, host, model.private === true);
+        const headers = authHeaders(job.accountId, host, model.private === true || model.sendToken === true); tokenSent = Boolean(headers.Authorization);
         const raw = await callGradio({ ...model, host }, endpoint, job.values || {}, job, headers, timer.signal);
         job.result = normalizeOutputs(raw, "Output", host);
         job.status = "done"; job.error = ""; job.attempts = 0; job.finishedAt = Date.now(); job.updatedAt = Date.now(); job.progress = 1; saveState(); ping(`Completed: ${job.name || model.title}`);
@@ -511,7 +518,7 @@ async function runQueue() {
         const message = timedOut ? `Request timed out after ${Math.round(GEN_TIMEOUT_MS / 60000)} minutes.` : (error.message || String(error));
         const kind = cancelled ? "cancelled" : classifyFailure(error.status, message);
         const until = holdFor(kind, message, error?.resetAt || null);
-        job.error = `[${kind.toUpperCase()}] ${cancelled ? "Cancelled by you. Retry when ready." : message}`; job.updatedAt = Date.now();
+        job.error = `[${kind.toUpperCase()}] ${cancelled ? "Cancelled by you. Retry when ready." : message} (endpoint /${job.apiName}, token ${tokenSent ? "sent" : "not sent"})`; job.updatedAt = Date.now();
         if (cancelled) {
           job.status = "paused"; queueHalted = true;
         } else if (kind === "quota") {
