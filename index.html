@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#10141b">
+  <meta name="description" content="A local-first workbench for Hugging Face Spaces, generation profiles, and queues.">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/src/styles.css">
+  <title>Multi-HF — Batch Studio</title>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <a class="brand" href="#queue" aria-label="Multi-HF home"><span class="brand-mark">HF</span><span><strong>Multi-HF</strong><small>Batch Studio</small></span></a>
+      <div class="workspace-label">WORKSPACE</div>
+      <nav id="nav" aria-label="Primary navigation">
+        <button class="nav-item active" data-tab="queue"><span class="nav-icon">▦</span> Queue <span id="nav-queue-count" class="nav-count">0</span></button>
+        <button class="nav-item" data-tab="jobs"><span class="nav-icon">◷</span> Jobs</button>
+        <button class="nav-item" data-tab="models"><span class="nav-icon">◇</span> Spaces & models</button>
+        <button class="nav-item" data-tab="profiles"><span class="nav-icon">▤</span> Profiles</button>
+        <button class="nav-item" data-tab="accounts"><span class="nav-icon">◎</span> Accounts</button>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="local-note"><span class="live-dot"></span><div><strong>Local-first</strong><small>Queue stored in this browser</small></div></div>
+        <button class="nav-item" id="export-data"><span class="nav-icon">⇩</span> Export data</button>
+        <button class="nav-item" id="import-data"><span class="nav-icon">⇧</span> Import data</button>
+        <input id="import-file" type="file" accept="application/json" hidden>
+      </div>
+    </aside>
+    <main class="main">
+      <header class="topbar"><div><div class="eyebrow">HUGGING FACE WORKSPACE</div><h1 id="page-title">Generation queue</h1></div><div class="top-actions"><span class="connection"><span class="live-dot"></span><span id="account-summary">No account connected</span></span><button class="button button-primary" id="quick-add">＋ New job</button></div></header>
+      <section id="notice" class="notice" hidden></section>
+      <section id="view" aria-live="polite"></section>
+      <footer class="footer"><span>Multi-HF · Local-first Gradio queue manager</span><span>Tokens are session-only and are never saved to browser storage.</span></footer>
+    </main>
+  </div>
+  <dialog id="dialog" class="dialog"><div id="dialog-content"></div></dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="/src/app.js"></script>
+</body>
+</html>

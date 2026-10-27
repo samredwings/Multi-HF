@@ -1,0 +1,542 @@
+import {
+  parseSpaceInput, normalizeHost, parseSpaceConfig, taskFromEndpoints, classifyFailure,
+  holdFor, normalizeOutputs, safeId,
+} from "./lib/core.js";
+
+const STORAGE_KEY = "multi-hf.workspace.v1";
+const view = document.querySelector("#view");
+const dialog = document.querySelector("#dialog");
+const dialogContent = document.querySelector("#dialog-content");
+const notice = document.querySelector("#notice");
+const toast = document.querySelector("#toast");
+const pageTitle = document.querySelector("#page-title");
+const navCount = document.querySelector("#nav-queue-count");
+const accountSummary = document.querySelector("#account-summary");
+const accountTokens = new Map();
+const jobFiles = new Map();
+let currentTab = "queue";
+let queueBusy = false;
+let queueHalted = false;
+let toastTimer;
+
+function readWorkspace() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+    return {
+      models: Array.isArray(parsed.models) ? parsed.models : [],
+      profiles: Array.isArray(parsed.profiles) ? parsed.profiles : [],
+      jobs: Array.isArray(parsed.jobs) ? parsed.jobs : [],
+      accounts: Array.isArray(parsed.accounts) ? parsed.accounts.map((a) => ({ ...a, connected: false })) : [],
+      settings: { lastAccountId: "", ...(parsed.settings || {}) },
+    };
+  } catch { return { models: [], profiles: [], jobs: [], accounts: [], settings: { lastAccountId: "" } }; }
+}
+let state = readWorkspace();
+const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
+const fmtDate = (value) => { const date = new Date(value); return Number.isNaN(+date) ? "—" : date.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); };
+const timeAgo = (value) => { const mins = Math.max(0, Math.floor((Date.now() - Number(value || 0)) / 60000)); return mins < 1 ? "just now" : mins < 60 ? `${mins}m ago` : mins < 1440 ? `${Math.floor(mins / 60)}h ago` : `${Math.floor(mins / 1440)}d ago`; };
+const getModel = (id) => state.models.find((model) => model.id === id);
+const getProfile = (id) => state.profiles.find((profile) => profile.id === id);
+const getAccount = (id) => state.accounts.find((account) => account.id === id);
+const connectedAccounts = () => state.accounts.filter((account) => account.connected && accountTokens.has(account.id));
+const waitingJobs = () => state.jobs.filter((job) => ["ready", "retry"].includes(job.status));
+function saveState() {
+  const persisted = {
+    models: state.models,
+    profiles: state.profiles,
+    jobs: state.jobs.map(({ result, ...job }) => ({ ...job, result: Array.isArray(result) ? result : [] })),
+    accounts: state.accounts.map(({ token, connected, ...account }) => ({ ...account, connected: false })),
+    settings: state.settings,
+  };
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted)); }
+  catch (error) { showNotice(`Workspace storage is full. Export your data and remove old jobs. ${error.message}`, "error"); }
+}
+function ping(message) {
+  toast.textContent = message;
+  toast.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toast.classList.remove("show"), 3500);
+}
+function showNotice(message, kind = "") {
+  notice.textContent = message;
+  notice.className = `notice ${kind}`.trim();
+  notice.hidden = false;
+}
+function clearNotice() { notice.hidden = true; notice.textContent = ""; notice.className = "notice"; }
+function showDialog(content) {
+  dialogContent.innerHTML = `<div class="dialog-inner">${content}</div>`;
+  if (!dialog.open) dialog.showModal();
+  dialogContent.querySelectorAll("[data-close]").forEach((button) => button.addEventListener("click", () => dialog.close()));
+}
+function dialogHeader(title, description = "") {
+  return `<div class="dialog-header"><div><h2>${escapeHtml(title)}</h2><p>${escapeHtml(description)}</p></div><button class="close" type="button" data-close aria-label="Close dialog">✕</button></div>`;
+}
+function render() {
+  const title = { queue: "Generation queue", jobs: "Job history", models: "Spaces & models", profiles: "Generation profiles", accounts: "Hugging Face accounts" }[currentTab];
+  pageTitle.textContent = title;
+  document.querySelectorAll("[data-tab]").forEach((button) => button.classList.toggle("active", button.dataset.tab === currentTab));
+  navCount.textContent = String(waitingJobs().length);
+  const connected = connectedAccounts().length;
+  accountSummary.textContent = connected ? `${connected} account${connected === 1 ? "" : "s"} connected` : "No account connected";
+  if (currentTab === "queue") renderQueue();
+  else if (currentTab === "jobs") renderJobs();
+  else if (currentTab === "models") renderModels();
+  else if (currentTab === "profiles") renderProfiles();
+  else renderAccounts();
+}
+function stat(label, value, foot) {
+  return `<div class="stat"><div class="stat-label">${escapeHtml(label)}</div><div class="stat-value">${escapeHtml(value)}</div><div class="stat-foot">${escapeHtml(foot)}</div></div>`;
+}
+function statusBadge(status) {
+  const cls = status === "done" ? "done" : status === "running" ? "running" : status === "paused" ? "paused" : status === "failed" ? "failed" : status === "ready" || status === "retry" ? "ready" : "";
+  const text = { ready: "READY", retry: "RETRY", running: "RUNNING", done: "COMPLETE", failed: "FAILED", paused: "PAUSED" }[status] || String(status || "UNKNOWN").toUpperCase();
+  return `<span class="badge ${cls}">${escapeHtml(text)}</span>`;
+}
+function renderQueue() {
+  const ready = waitingJobs().length;
+  const done = state.jobs.filter((job) => job.status === "done").length;
+  const paused = state.jobs.filter((job) => job.status === "paused").length;
+  const failed = state.jobs.filter((job) => job.status === "failed").length;
+  const rows = state.jobs.filter((job) => job.status !== "done").slice().reverse().slice(0, 12);
+  view.innerHTML = `
+    <div class="stats">${stat("Pending jobs", ready, "Waiting to run")}${stat("Completed", done, "Finished successfully")}${stat("Paused", paused, "Needs a manual decision")}${stat("Failed", failed, "Review the error details")}</div>
+    <div class="section-head"><div><h2>Queue workspace</h2><p>Jobs run one at a time to keep Space state predictable.</p></div><div class="inline-actions"><button class="button button-quiet" id="queue-pause" ${queueBusy ? "" : "disabled"}>Pause queue</button><button class="button button-primary" id="queue-run" ${queueBusy || !ready ? "disabled" : ""}>▶ Run queue</button></div></div>
+    <div class="panel"><div class="panel-head"><div><h2>Upcoming & active</h2><div class="subtext">${queueBusy ? "A job is currently running." : queueHalted ? "Queue is paused after a quota/resource failure." : "Ready when you are."}</div></div><button class="button button-sm" id="queue-add">＋ Add job</button></div>
+    ${rows.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>Job</th><th>Space</th><th>Status</th><th>Updated</th><th>Action</th></tr></thead><tbody>${rows.map(jobRow).join("")}</tbody></table></div>` : `<div class="empty"><div class="empty-mark">▦</div><strong>Your queue is clear</strong><p>Add a Hugging Face Space, create a profile, and enqueue a generation job. Results and queue state stay in this browser.</p><button class="button button-primary" id="queue-empty-add">＋ Create first job</button></div>`}</div>
+    <div class="section-head"><div><h2>Latest results</h2><p>Open a completed job to view its output gallery.</p></div><button class="button button-quiet button-sm" data-goto="jobs">View all jobs ↗</button></div>
+    ${renderRecentResults()}`;
+  document.querySelector("#queue-run")?.addEventListener("click", () => runQueue());
+  document.querySelector("#queue-pause")?.addEventListener("click", () => { queueHalted = true; ping("Queue paused. The active request may finish before stopping."); });
+  ["queue-add", "queue-empty-add"].forEach((id) => document.querySelector(`#${id}`)?.addEventListener("click", () => openNewJob()));
+  bindJobActions();
+  document.querySelectorAll("[data-goto]").forEach((button) => button.addEventListener("click", () => { currentTab = button.dataset.goto; render(); }));
+}
+function jobRow(job) {
+  const model = getModel(job.modelId);
+  const title = job.name || job.values?.prompt || job.apiName || "Generation job";
+  return `<tr><td><div><strong>${escapeHtml(String(title).slice(0, 80))}</strong><div class="subtext">${escapeHtml(job.apiName || "API")}</div></div></td><td>${escapeHtml(model?.title || job.modelId)}<div class="subtext">${escapeHtml(model?.ref || model?.host || "Space")}</div></td><td>${statusBadge(job.status)}${job.error ? `<div class="subtext">${escapeHtml(job.error)}</div>` : ""}</td><td>${escapeHtml(fmtDate(job.updatedAt || job.createdAt))}</td><td><div class="inline-actions"><button class="button button-sm" data-job-open="${escapeHtml(job.id)}">Details</button>${["failed", "paused"].includes(job.status) ? `<button class="button button-sm" data-job-retry="${escapeHtml(job.id)}">Retry</button>` : ""}</div></td></tr>`;
+}
+function renderRecentResults() {
+  const completed = state.jobs.filter((job) => job.status === "done" && Array.isArray(job.result) && job.result.length).slice(-3).reverse();
+  if (!completed.length) return `<div class="panel"><div class="empty"><div class="empty-mark">◫</div><strong>No results yet</strong><p>Once a queued job completes, its output media will appear here.</p></div></div>`;
+  return `<div class="card-grid">${completed.map((job) => `<div class="profile-card"><div class="card-title">${escapeHtml(job.name || job.apiName || "Result")}</div><div class="card-meta">${escapeHtml(getModel(job.modelId)?.title || job.modelId)} · ${escapeHtml(fmtDate(job.updatedAt))}</div><div class="card-actions"><button class="button button-sm" data-job-open="${escapeHtml(job.id)}">Open result gallery (${job.result.length})</button></div></div>`).join("")}</div>`;
+}
+function renderJobs() {
+  const rows = state.jobs.slice().reverse();
+  view.innerHTML = `<div class="section-head"><div><h2>All jobs</h2><p>${rows.length} saved job record${rows.length === 1 ? "" : "s"}. Output links are kept with each completed job.</p></div><div class="inline-actions"><button class="button" id="jobs-clear">Clear completed</button><button class="button button-primary" id="jobs-add">＋ New job</button></div></div>
+  <div class="panel">${rows.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>Job</th><th>Space / API</th><th>Status</th><th>Created</th><th>Controls</th></tr></thead><tbody>${rows.map(jobRow).join("")}</tbody></table></div>` : `<div class="empty"><div class="empty-mark">◷</div><strong>No saved jobs</strong><p>Jobs you enqueue will be recorded here so you can retry or inspect them later.</p><button class="button button-primary" id="jobs-empty-add">＋ Create a job</button></div>`}</div>`;
+  document.querySelector("#jobs-add")?.addEventListener("click", () => openNewJob());
+  document.querySelector("#jobs-empty-add")?.addEventListener("click", () => openNewJob());
+  document.querySelector("#jobs-clear")?.addEventListener("click", () => { state.jobs = state.jobs.filter((job) => job.status !== "done"); saveState(); render(); ping("Completed jobs cleared."); });
+  bindJobActions();
+}
+function renderModels() {
+  view.innerHTML = `<div class="section-head"><div><h2>Connected Spaces</h2><p>Discover Gradio endpoints from each Space's live configuration.</p></div><button class="button button-primary" id="models-add">＋ Add Space</button></div>
+  ${state.models.length ? `<div class="card-grid">${state.models.map((model) => `<article class="model-card"><div class="inline-actions"><span class="badge ${model.task === "video" ? "running" : ""}">${escapeHtml(model.task.toUpperCase())}</span><span class="badge">${model.endpoints.length} endpoints</span></div><div class="card-title" style="margin-top:12px">${escapeHtml(model.title)}</div><div class="card-meta">${escapeHtml(model.ref || model.host)}<br>Updated ${escapeHtml(timeAgo(model.fetchedAt))}</div><div class="card-actions"><button class="button button-primary button-sm" data-model-new="${escapeHtml(model.id)}">Create job</button><button class="button button-sm" data-model-refresh="${escapeHtml(model.id)}">Refresh schema</button><a class="button button-sm" href="${escapeHtml(model.ref ? `https://huggingface.co/spaces/${model.ref}` : model.host)}" target="_blank" rel="noopener">Open Space ↗</a><button class="button button-danger button-sm" data-model-remove="${escapeHtml(model.id)}">Remove</button></div></article>`).join("")}</div>` : `<div class="panel"><div class="empty"><div class="empty-mark">◇</div><strong>Add your first Space</strong><p>Enter a Hugging Face Space ID such as <span class="kbd">owner/name</span> or its public URL. Multi-HF reads the live Gradio schema and creates a dynamic generation form.</p><button class="button button-primary" id="models-empty-add">＋ Discover Space</button></div></div>`}`;
+  document.querySelector("#models-add")?.addEventListener("click", () => openAddSpace());
+  document.querySelector("#models-empty-add")?.addEventListener("click", () => openAddSpace());
+  document.querySelectorAll("[data-model-new]").forEach((button) => button.addEventListener("click", () => openNewJob(button.dataset.modelNew)));
+  document.querySelectorAll("[data-model-refresh]").forEach((button) => button.addEventListener("click", () => discoverSpace(button.dataset.modelRefresh)));
+  document.querySelectorAll("[data-model-remove]").forEach((button) => button.addEventListener("click", () => {
+    const id = button.dataset.modelRemove;
+    if (!confirm("Remove this Space from your saved workspace? Existing job history stays in place.")) return;
+    state.models = state.models.filter((model) => model.id !== id); state.profiles = state.profiles.filter((profile) => profile.modelId !== id); saveState(); render();
+  }));
+}
+function renderProfiles() {
+  view.innerHTML = `<div class="section-head"><div><h2>Reusable profiles</h2><p>Profiles save a Space, endpoint, and parameter values for quick batch creation.</p></div><button class="button button-primary" id="profiles-new">＋ New profile</button></div>
+  ${state.profiles.length ? `<div class="card-grid">${state.profiles.map((profile) => `<article class="profile-card"><div class="card-title">${escapeHtml(profile.name)}</div><div class="card-meta">${escapeHtml(getModel(profile.modelId)?.title || profile.modelId)}<br>${escapeHtml(profile.apiName)} · updated ${escapeHtml(timeAgo(profile.updatedAt))}</div><div class="card-actions"><button class="button button-primary button-sm" data-profile-use="${escapeHtml(profile.id)}">Use profile</button><button class="button button-sm" data-profile-edit="${escapeHtml(profile.id)}">Edit</button><button class="button button-danger button-sm" data-profile-remove="${escapeHtml(profile.id)}">Delete</button></div></article>`).join("")}</div>` : `<div class="panel"><div class="empty"><div class="empty-mark">▤</div><strong>No profiles saved</strong><p>Open a Space, set the prompt and generation parameters, then save those settings as a reusable profile.</p><button class="button button-primary" id="profiles-empty-new">＋ Create profile</button></div></div>`}`;
+  document.querySelector("#profiles-new")?.addEventListener("click", () => openNewProfile());
+  document.querySelector("#profiles-empty-new")?.addEventListener("click", () => openNewProfile());
+  document.querySelectorAll("[data-profile-use]").forEach((button) => button.addEventListener("click", () => { const profile = getProfile(button.dataset.profileUse); if (profile) openNewJob(profile.modelId, profile); }));
+  document.querySelectorAll("[data-profile-edit]").forEach((button) => button.addEventListener("click", () => { const profile = getProfile(button.dataset.profileEdit); if (profile) openNewProfile(profile); }));
+  document.querySelectorAll("[data-profile-remove]").forEach((button) => button.addEventListener("click", () => { state.profiles = state.profiles.filter((p) => p.id !== button.dataset.profileRemove); saveState(); render(); ping("Profile deleted."); }));
+}
+function renderAccounts() {
+  view.innerHTML = `<div class="section-head"><div><h2>Accounts</h2><p>Tokens are kept in memory only. Reconnect after a page refresh.</p></div><button class="button button-primary" id="account-add">＋ Connect account</button></div>
+  <div class="account-warning">Access tokens are never written to localStorage or exported. Use a fine-grained Hugging Face token with the minimum permissions required for the Spaces you use. This browser sends the token directly to the Hugging Face host selected for the request.</div>
+  ${state.accounts.length ? `<div class="card-grid">${state.accounts.map((account) => `<article class="account-card"><div class="inline-actions"><span class="badge ${account.connected ? "ready" : ""}">${account.connected ? "CONNECTED" : "SESSION EXPIRED"}</span>${account.enabled ? "" : `<span class="badge warning">DISABLED</span>`}</div><div class="card-title" style="margin-top:12px">${escapeHtml(account.label)}</div><div class="card-meta">${escapeHtml(account.username ? `@${account.username}` : "Username not verified")}<br>${account.connected ? "Token available in this tab" : "Reconnect token to use private Spaces"}</div><div class="card-actions"><button class="button button-primary button-sm" data-account-connect="${escapeHtml(account.id)}">${account.connected ? "Replace token" : "Connect token"}</button><button class="button button-sm" data-account-enable="${escapeHtml(account.id)}">${account.enabled ? "Disable" : "Enable"}</button><button class="button button-danger button-sm" data-account-remove="${escapeHtml(account.id)}">Remove</button></div></article>`).join("")}</div>` : `<div class="panel"><div class="empty"><div class="empty-mark">◎</div><strong>No account connected</strong><p>Public Spaces can be discovered without a token. Connect an account to access private Spaces and authenticated API endpoints.</p><button class="button button-primary" id="accounts-empty-add">＋ Connect account</button></div></div>`}
+  <div class="panel" style="margin-top:18px"><div class="panel-head"><div><h2>Resource and quota behavior</h2><div class="subtext">Transparent failure handling, no guessed reset timers.</div></div></div><div class="panel-body"><div class="field-grid"><div><div class="card-title">Quota exhausted</div><p class="card-meta">The active job is paused and the queue stops. Retry only when the service reports eligibility or you deliberately select another permitted resource.</p></div><div><div class="card-title">Auth / transient errors</div><p class="card-meta">Errors are shown on the job. Select an account or Space manually before retrying; tokens are not silently switched between accounts.</p></div></div></div></div>`;
+  document.querySelector("#account-add")?.addEventListener("click", () => openAccountDialog());
+  document.querySelector("#accounts-empty-add")?.addEventListener("click", () => openAccountDialog());
+  document.querySelectorAll("[data-account-connect]").forEach((button) => button.addEventListener("click", () => openAccountDialog(getAccount(button.dataset.accountConnect))));
+  document.querySelectorAll("[data-account-enable]").forEach((button) => button.addEventListener("click", () => { const account = getAccount(button.dataset.accountEnable); if (account) account.enabled = !account.enabled; saveState(); render(); }));
+  document.querySelectorAll("[data-account-remove]").forEach((button) => button.addEventListener("click", () => { const id = button.dataset.accountRemove; accountTokens.delete(id); state.accounts = state.accounts.filter((a) => a.id !== id); saveState(); render(); ping("Account removed."); }));
+}
+function bindJobActions() {
+  document.querySelectorAll("[data-job-open]").forEach((button) => button.addEventListener("click", () => openJobDetails(button.dataset.jobOpen)));
+  document.querySelectorAll("[data-job-retry]").forEach((button) => button.addEventListener("click", () => {
+    const job = state.jobs.find((item) => item.id === button.dataset.jobRetry);
+    if (!job) return;
+    job.status = "retry"; job.error = ""; job.updatedAt = Date.now(); job.quotaResetAt = null; queueHalted = false; saveState(); render(); ping("Job queued for manual retry.");
+  }));
+}
+function openAccountDialog(existing = null) {
+  showDialog(`${dialogHeader(existing ? "Connect account" : "Add Hugging Face account", "The access token stays in memory for this browser tab only.")}
+  <form id="account-form"><div class="field-grid"><div class="field"><label for="account-label">Account label</label><input id="account-label" name="label" required maxlength="60" value="${escapeHtml(existing?.label || "")}" placeholder="Personal account"></div><div class="field"><label for="account-username">Hugging Face username (optional)</label><input id="account-username" name="username" maxlength="80" value="${escapeHtml(existing?.username || "")}" placeholder="username"></div><div class="field full"><label for="account-token">Access token</label><input id="account-token" name="token" type="password" required autocomplete="off" placeholder="hf_…"><small>Use a read token for public/private Space discovery and the minimum inference permissions needed for your workload. The token is not persisted.</small></div></div><div class="account-warning">Do not paste this token into prompts, profiles, exports, or issue reports. This app calls Hugging Face endpoints from your browser; browser extensions and shared devices remain a local security risk.</div><div class="form-actions"><button class="button" type="button" data-close>Cancel</button><button class="button button-primary" type="submit">Connect session</button></div></form>`);
+  document.querySelector("#account-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const label = String(form.get("label") || "").trim(); const username = String(form.get("username") || "").trim(); const token = String(form.get("token") || "").trim();
+    if (!token) { ping("Enter a token to connect this session."); return; }
+    let account = existing ? getAccount(existing.id) : null;
+    if (!account) { account = { id: safeId("account"), label, username, enabled: true, createdAt: Date.now(), connected: false }; state.accounts.push(account); }
+    account.label = label; account.username = username; account.connected = true; account.enabled = true; accountTokens.set(account.id, token); state.settings.lastAccountId = account.id;
+    const submit = event.currentTarget.querySelector("[type=submit]"); submit.disabled = true; submit.textContent = "Checking token…";
+    try {
+      const response = await fetch("https://huggingface.co/api/whoami-v2", { headers: { Authorization: `Bearer ${token}` } });
+      if (response.status === 401 || response.status === 403) throw new Error("Hugging Face rejected this token. Check that it is active and has the required access.");
+      if (response.ok) { const data = await response.json(); if (data.name && !username) account.username = data.name; }
+      else if (response.status !== 404) throw new Error(`Token validation returned HTTP ${response.status}.`);
+      saveState(); dialog.close(); render(); ping(`Connected ${account.label} for this session.`);
+    } catch (error) {
+      if (/Failed to fetch|NetworkError/i.test(String(error))) {
+        // A CORS/network failure does not prove a token is invalid. Keep the token session-only but warn.
+        saveState(); dialog.close(); render(); showNotice("Token could not be verified from this browser (network/CORS). It remains session-only; try a public Space or inspect browser/network permissions.", "error");
+      } else {
+        accountTokens.delete(account.id); account.connected = false; saveState(); submit.disabled = false; submit.textContent = "Connect session"; ping(error.message || "Token check failed.");
+      }
+    }
+  });
+}
+function openAddSpace() {
+  const accounts = [{ id: "", label: "Public / no token" }, ...connectedAccounts().map((a) => ({ id: a.id, label: a.label }))];
+  showDialog(`${dialogHeader("Discover a Hugging Face Space", "Multi-HF reads the live Gradio /config schema and builds an endpoint form.")}
+  <form id="space-form"><div class="field-grid"><div class="field full"><label for="space-ref">Space URL or owner/name</label><input id="space-ref" name="ref" required placeholder="owner/space-name or https://huggingface.co/spaces/owner/name"><small>Public Spaces work without a token. CORS or private-space permissions can still block browser access.</small></div><div class="field"><label for="space-account">Use account</label><select id="space-account" name="accountId">${accounts.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.label)}</option>`).join("")}</select></div><div class="field"><label for="space-note">Optional label</label><input id="space-note" name="note" maxlength="90" placeholder="My animation Space"></div></div><div class="form-actions"><button class="button" type="button" data-close>Cancel</button><button class="button button-primary" type="submit">Discover Space</button></div></form>`);
+  document.querySelector("#space-form").addEventListener("submit", async (event) => {
+    event.preventDefault(); const form = new FormData(event.currentTarget); const ref = String(form.get("ref") || "").trim(); const accountId = String(form.get("accountId") || ""); const note = String(form.get("note") || "").trim();
+    const submit = event.currentTarget.querySelector("[type=submit]"); submit.disabled = true; submit.textContent = "Discovering…";
+    try { await discoverSpace(null, { ref, accountId, note }); dialog.close(); }
+    catch (error) { submit.disabled = false; submit.textContent = "Discover Space"; ping(error.message || "Space discovery failed."); }
+  });
+}
+async function authHeaders(accountId = "") {
+  const token = accountId ? accountTokens.get(accountId) : null;
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+async function fetchJson(url, options = {}, failureMessage = "Request failed") {
+  const response = await fetch(url, options);
+  if (!response.ok) {
+    let message = ""; try { const body = await response.json(); message = body?.error || body?.detail || body?.message || ""; } catch { try { message = (await response.text()).slice(0, 500); } catch {} }
+    const error = new Error(message || `${failureMessage} (HTTP ${response.status})`); error.status = response.status; throw error;
+  }
+  return response.json();
+}
+async function discoverSpace(modelId = null, options = {}) {
+  clearNotice();
+  const prior = modelId ? getModel(modelId) : null;
+  const ref = options.ref || prior?.ref || prior?.host || modelId;
+  const accountId = options.accountId || prior?.accountId || state.settings.lastAccountId || "";
+  const headers = await authHeaders(accountId);
+  let parsedInput = parseSpaceInput(ref);
+  let host = parsedInput.host;
+  let resolvedId = parsedInput.id;
+  let apiData = null;
+  if (resolvedId) {
+    apiData = await fetchJson(`https://huggingface.co/api/spaces/${resolvedId.split("/").map(encodeURIComponent).join("/")}`, { headers }, "Space metadata request failed");
+    host = normalizeHost(apiData.host, apiData.subdomain || apiData.cardData?.subdomain);
+    if (!host && apiData.runtime?.stage && typeof apiData.subdomain === "string") host = normalizeHost(null, apiData.subdomain);
+    if (!host) throw new Error("Hugging Face did not return a Space host. Check that the Space exists and is accessible.");
+  }
+  if (!host) throw new Error("Could not resolve the Space's public host.");
+  let config; let configError;
+  for (const suffix of ["/config", "/gradio_api/config"]) {
+    try { config = await fetchJson(`${host}${suffix}`, { headers }, "Could not read the Gradio config"); break; }
+    catch (error) { configError = error; if (error.status !== 404 && error.status !== 405) break; }
+  }
+  if (!config) throw new Error(`${configError?.message || "Could not read this Space's Gradio config."} If this Space is private, connect a token; if browser access is blocked, use a browser with compatible CORS permissions.`);
+  const schema = parseSpaceConfig(config);
+  const id = resolvedId || prior?.id || host;
+  const name = options.note || prior?.note || "";
+  const model = {
+    id, kind: "space", ref: resolvedId || prior?.ref || "", host,
+    title: name || schema.title || apiData?.cardData?.title || resolvedId || host,
+    task: taskFromEndpoints(schema.endpoints), apiPrefix: schema.apiPrefix,
+    endpoints: schema.endpoints, activeApi: schema.endpoints[0]?.apiName || "", accountId,
+    hardware: apiData?.runtime?.hardware?.current || apiData?.runtime?.hardware || "Unknown", fetchedAt: Date.now(), note: name,
+  };
+  const existingIndex = state.models.findIndex((item) => item.id === id || item.host === host);
+  if (existingIndex >= 0) state.models.splice(existingIndex, 1, model); else state.models.push(model);
+  saveState(); render(); ping(`Discovered ${model.title}: ${model.endpoints.length} API endpoints.`);
+  return model;
+}
+function endpointFor(model, apiName) { return model?.endpoints?.find((endpoint) => endpoint.apiName === apiName) || model?.endpoints?.[0]; }
+function inputElement(field, value, profileMode = false) {
+  if (field.hidden) return "";
+  const id = `f-${field.key}`;
+  const label = escapeHtml(field.label || field.key);
+  const hint = field.hint ? `<small>${escapeHtml(field.hint)}</small>` : "";
+  let input = "";
+  if (field.type === "textarea") input = `<textarea id="${id}" data-key="${escapeHtml(field.key)}" placeholder="${escapeHtml(field.placeholder || "")}" rows="3">${escapeHtml(value ?? field.defaultValue ?? "")}</textarea>`;
+  else if (field.type === "checkbox") input = `<label class="inline-actions"><input id="${id}" data-key="${escapeHtml(field.key)}" type="checkbox" ${value === true || (value == null && field.defaultValue === true) ? "checked" : ""}> <span>${label}</span></label>`;
+  else if (field.type === "select" || field.type === "radio" || field.type === "checkboxgroup") {
+    const choices = field.choices || [];
+    if (field.type === "checkboxgroup") input = choices.length ? `<div class="choice-list">${choices.map((choice, i) => `<label class="inline-actions"><input type="checkbox" data-key="${escapeHtml(field.key)}" data-choice="${escapeHtml(choice.value)}" ${(Array.isArray(value) ? value : []).includes(choice.value) ? "checked" : ""}><span>${escapeHtml(choice.label)}</span></label>`).join("")}</div>` : `<input id="${id}" data-key="${escapeHtml(field.key)}" placeholder="Comma-separated values" value="${escapeHtml(Array.isArray(value) ? value.join(", ") : "")}">`;
+    else input = `<select id="${id}" data-key="${escapeHtml(field.key)}">${choices.map((choice) => `<option value="${escapeHtml(choice.value)}" ${(String(value ?? field.defaultValue ?? "") === choice.value) ? "selected" : ""}>${escapeHtml(choice.label)}</option>`).join("")}${!choices.length ? `<option value="${escapeHtml(value ?? "")}">${escapeHtml(value ?? "Select a value")}</option>` : ""}</select>`;
+  }
+  else if (field.type === "slider") input = `<div><input id="${id}" data-key="${escapeHtml(field.key)}" type="range" min="${field.min ?? 0}" max="${field.max ?? 100}" step="${field.step ?? 1}" value="${escapeHtml(value ?? field.defaultValue ?? field.min ?? 0)}"><small id="${id}-value">${escapeHtml(value ?? field.defaultValue ?? field.min ?? 0)}</small></div>`;
+  else if (field.type === "number") input = `<input id="${id}" data-key="${escapeHtml(field.key)}" type="number" ${field.min != null ? `min="${field.min}"` : ""} ${field.max != null ? `max="${field.max}"` : ""} ${field.step != null ? `step="${field.step}"` : ""} value="${escapeHtml(value ?? field.defaultValue ?? "")}">`;
+  else if (["image", "video", "audio", "file"].includes(field.type)) input = `<input id="${id}" data-key="${escapeHtml(field.key)}" type="file" accept="${field.type === "image" ? "image/*" : field.type === "video" ? "video/*" : field.type === "audio" ? "audio/*" : "*/*"}" ${profileMode ? "disabled" : ""}><small>File inputs are attached when the job is enqueued. Reattach files after reloading the page.</small>`;
+  else input = `<input id="${id}" data-key="${escapeHtml(field.key)}" type="text" placeholder="${escapeHtml(field.placeholder || "")}" value="${escapeHtml(value ?? field.defaultValue ?? "")}">`;
+  return `<div class="field ${field.type === "textarea" ? "full" : ""}">${field.type === "checkbox" ? input : `<label for="${id}">${label}${field.type === "number" && field.min != null ? ` <span class="muted">(min ${field.min})</span>` : ""}</label>${input}`}${hint}</div>`;
+}
+function collectValues(container, endpoint, fileMap = null) {
+  const values = {};
+  for (const field of endpoint.fields) {
+    if (field.hidden) { values[field.key] = field.passthrough ?? field.defaultValue ?? null; continue; }
+    if (field.type === "checkboxgroup") {
+      const boxes = [...container.querySelectorAll(`input[type=checkbox][data-key="${CSS.escape(field.key)}"]`)].filter((input) => input.checked);
+      const fallback = container.querySelector(`input[data-key="${CSS.escape(field.key)}"]:not([data-choice])`);
+      values[field.key] = boxes.length ? boxes.map((input) => input.dataset.choice) : fallback?.value.split(",").map((v) => v.trim()).filter(Boolean) || [];
+      continue;
+    }
+    const input = container.querySelector(`[data-key="${CSS.escape(field.key)}"]`);
+    if (!input) continue;
+    if (["image", "video", "audio", "file"].includes(field.type)) {
+      if (input.files?.[0] && fileMap) fileMap.set(field.key, input.files[0]);
+      values[field.key] = input.files?.[0] ? { name: input.files[0].name, size: input.files[0].size, mime: input.files[0].type } : null;
+    } else if (field.type === "checkbox") values[field.key] = input.checked;
+    else if (["number", "slider"].includes(field.type)) values[field.key] = input.value === "" ? null : Number(input.value);
+    else values[field.key] = input.value;
+  }
+  return values;
+}
+function openNewJob(modelId = null, profile = null) {
+  if (!state.models.length) { currentTab = "models"; render(); openAddSpace(); return; }
+  const model = getModel(modelId) || getModel(profile?.modelId) || state.models[0];
+  const endpoint = endpointFor(model, profile?.apiName || model.activeApi);
+  if (!endpoint) { ping("This Space has no runnable endpoints. Refresh its schema."); return; }
+  const files = new Map();
+  const profiles = state.profiles.filter((p) => p.modelId === model.id);
+  const accounts = [{ id: "", label: "Public / no token" }, ...connectedAccounts().filter((a) => a.enabled).map((a) => ({ id: a.id, label: a.label }))];
+  showDialog(`${dialogHeader("Create generation job", "Choose a Space endpoint, set its parameters, and add the job to the persistent queue.")}
+    <form id="job-form"><div class="field-grid"><div class="field"><label for="job-name">Job name</label><input id="job-name" name="name" maxlength="100" value="${escapeHtml(profile?.name || "")}" placeholder="e.g. cinematic city loop"></div><div class="field"><label for="job-model">Space</label><select id="job-model" name="modelId">${state.models.map((m) => `<option value="${escapeHtml(m.id)}" ${m.id === model.id ? "selected" : ""}>${escapeHtml(m.title)}</option>`).join("")}</select></div><div class="field"><label for="job-api">API endpoint</label><select id="job-api" name="apiName">${model.endpoints.map((ep) => `<option value="${escapeHtml(ep.apiName)}" ${ep.apiName === endpoint.apiName ? "selected" : ""}>/${escapeHtml(ep.apiName)}</option>`).join("")}</select></div><div class="field"><label for="job-account">Account for this job</label><select id="job-account" name="accountId">${accounts.map((a) => `<option value="${escapeHtml(a.id)}" ${String(profile?.accountId || model.accountId || state.settings.lastAccountId || "") === a.id ? "selected" : ""}>${escapeHtml(a.label)}</option>`).join("")}</select><small>Account selection is explicit; tokens are not silently rotated.</small></div></div><div class="section-head"><div><h2>Generation parameters</h2><p>Inputs are created from the live Gradio schema.</p></div></div><div class="field-grid" id="job-fields"></div><div class="field full" style="margin-top:16px"><label class="inline-actions"><input id="job-save-profile" type="checkbox" ${profile ? "checked" : ""}><span>Save these settings as a reusable profile</span></label></div><div class="field ${profile ? "" : "hidden"}" id="job-profile-name-wrap"><label for="job-profile-name">Profile name</label><input id="job-profile-name" value="${escapeHtml(profile?.name || "")}" placeholder="Reusable profile name"></div><div class="form-actions"><button class="button" type="button" data-close>Cancel</button><button class="button button-primary" type="submit">＋ Add to queue</button></div></form>`);
+  const form = document.querySelector("#job-form");
+  const modelSelect = document.querySelector("#job-model"); const apiSelect = document.querySelector("#job-api");
+  function refillEndpoints(selectedApi = "") {
+    const chosen = getModel(modelSelect.value);
+    apiSelect.innerHTML = (chosen?.endpoints || []).map((ep) => `<option value="${escapeHtml(ep.apiName)}" ${ep.apiName === selectedApi ? "selected" : ""}>/${escapeHtml(ep.apiName)}</option>`).join("");
+    refillFields();
+  }
+  function refillFields() {
+    const chosen = getModel(modelSelect.value); const ep = endpointFor(chosen, apiSelect.value);
+    const stored = profile && profile.modelId === chosen?.id && profile.apiName === ep?.apiName ? profile.values : {};
+    document.querySelector("#job-fields").innerHTML = (ep?.fields || []).filter((f) => !f.hidden).map((field) => inputElement(field, stored?.[field.key])).join("") || `<p class="help">No visible parameters were detected. This endpoint may require inputs unsupported by this form.</p>`;
+    files.clear();
+    document.querySelectorAll("input[type=range]").forEach((input) => input.addEventListener("input", () => { const output = document.querySelector(`#${CSS.escape(input.id)}-value`); if (output) output.textContent = input.value; }));
+  }
+  modelSelect.addEventListener("change", () => { refillEndpoints(); const options = [{ id: "", label: "Public / no token" }, ...connectedAccounts().filter((a) => a.enabled).map((a) => ({ id: a.id, label: a.label }))]; document.querySelector("#job-account").innerHTML = options.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.label)}</option>`).join(""); });
+  apiSelect.addEventListener("change", refillFields);
+  refillFields();
+  document.querySelector("#job-save-profile").addEventListener("change", (event) => { document.querySelector("#job-profile-name-wrap").classList.toggle("hidden", !event.target.checked); });
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const chosen = getModel(modelSelect.value); const ep = endpointFor(chosen, apiSelect.value);
+    if (!chosen || !ep) { ping("Select a valid Space endpoint."); return; }
+    const values = collectValues(form, ep, files);
+    const name = String(new FormData(form).get("name") || values.prompt || ep.apiName).trim();
+    const jobId = safeId("job");
+    const job = { id: jobId, name, modelId: chosen.id, apiName: ep.apiName, accountId: String(new FormData(form).get("accountId") || ""), values, files: [...files.keys()], status: "ready", error: "", result: [], createdAt: Date.now(), updatedAt: Date.now() };
+    state.jobs.push(job);
+    jobFiles.set(jobId, files);
+    if (document.querySelector("#job-save-profile").checked) {
+      const profileName = String(document.querySelector("#job-profile-name").value || name).trim();
+      if (profileName) {
+        const existing = state.profiles.find((p) => p.name === profileName && p.modelId === chosen.id);
+        const profileRecord = { id: existing?.id || safeId("profile"), name: profileName, modelId: chosen.id, apiName: ep.apiName, values: JSON.parse(JSON.stringify(values)), accountId: job.accountId, createdAt: existing?.createdAt || Date.now(), updatedAt: Date.now() };
+        if (existing) Object.assign(existing, profileRecord); else state.profiles.push(profileRecord);
+      }
+    }
+    saveState(); dialog.close(); currentTab = "queue"; render(); ping("Job added to queue.");
+  });
+}
+function openNewProfile(existing = null) {
+  if (existing) { openNewJob(existing.modelId, existing); return; }
+  if (!state.models.length) { currentTab = "models"; render(); openAddSpace(); return; }
+  openNewJob(state.models[0].id);
+  ping("In the job form, enable ‘Save these settings as a reusable profile’ before adding it.");
+}
+function openJobDetails(jobId) {
+  const job = state.jobs.find((item) => item.id === jobId); if (!job) return;
+  const model = getModel(job.modelId);
+  const result = Array.isArray(job.result) ? job.result : [];
+  showDialog(`${dialogHeader(job.name || "Generation job", `${model?.title || job.modelId} · /${job.apiName}`)}
+    <div class="field-grid"><div><div class="label">Status</div><p>${statusBadge(job.status)}</p></div><div><div class="label">Last updated</div><p class="card-meta">${escapeHtml(fmtDate(job.updatedAt))}</p></div><div class="field full"><label>Error / event details</label><div class="panel-body" style="border:1px solid var(--line);border-radius:8px;white-space:pre-wrap;word-break:break-word">${escapeHtml(job.error || "No error recorded.")}</div></div></div>
+    <div class="section-head"><div><h2>Output gallery</h2><p>${result.length} normalized output item${result.length === 1 ? "" : "s"}</p></div></div>${renderResults(result)}
+    <div class="form-actions"><button class="button" type="button" data-close>Close</button>${["failed", "paused"].includes(job.status) ? `<button class="button button-primary" id="detail-retry">Retry job</button>` : ""}<button class="button" id="detail-clone">Clone job</button></div>`);
+  document.querySelector("#detail-retry")?.addEventListener("click", () => { job.status = "retry"; job.error = ""; job.updatedAt = Date.now(); queueHalted = false; saveState(); dialog.close(); currentTab = "queue"; render(); ping("Job marked for retry."); });
+  document.querySelector("#detail-clone")?.addEventListener("click", () => { const profile = { modelId: job.modelId, apiName: job.apiName, values: job.values, accountId: job.accountId, name: job.name }; dialog.close(); openNewJob(job.modelId, profile); });
+}
+function renderResults(result) {
+  if (!result.length) return `<div class="panel"><div class="empty"><div class="empty-mark">◫</div><strong>No media output to show</strong><p>Once the endpoint returns outputs, they will be shown here.</p></div></div>`;
+  return `<div class="result-grid">${result.map((item) => {
+    const label = escapeHtml(item.label || "Output");
+    if (item.kind === "image" && item.url) return `<div class="result-item"><a href="${escapeHtml(item.url)}" target="_blank" rel="noopener"><img loading="lazy" src="${escapeHtml(item.url)}" alt="${label}"></a><div class="result-caption">${label} · <a href="${escapeHtml(item.url)}" download>Download</a></div></div>`;
+    if (item.kind === "video" && item.url) return `<div class="result-item"><video controls preload="metadata" src="${escapeHtml(item.url)}"></video><div class="result-caption">${label} · <a href="${escapeHtml(item.url)}" download>Download</a></div></div>`;
+    if (item.kind === "audio" && item.url) return `<div class="result-item"><audio controls preload="metadata" src="${escapeHtml(item.url)}"></audio><div class="result-caption">${label} · <a href="${escapeHtml(item.url)}" download>Download</a></div></div>`;
+    if (item.url) return `<div class="result-item"><div class="result-caption">${label}<br><a href="${escapeHtml(item.url)}" target="_blank" rel="noopener">Open or download file ↗</a></div></div>`;
+    return `<div class="result-item"><div class="result-caption"><strong>${label}</strong><pre style="white-space:pre-wrap;overflow-wrap:anywhere;color:#d9e3f1">${escapeHtml(item.text || "")}</pre></div></div>`;
+  }).join("")}</div>`;
+}
+async function uploadFile(file, host, apiPrefix, headers) {
+  const form = new FormData(); form.append("files", file, file.name);
+  let lastError;
+  for (const url of [`${host}${apiPrefix}/upload`, `${host}/upload`]) {
+    try {
+      const response = await fetch(url, { method: "POST", headers, body: form });
+      if (!response.ok) { const err = new Error(`Upload failed (HTTP ${response.status})`); err.status = response.status; throw err; }
+      const body = await response.json();
+      const path = Array.isArray(body) ? body[0] : body?.path || body?.files?.[0]?.path || body?.[0]?.path;
+      if (!path) throw new Error("Space upload endpoint returned no file path.");
+      return { path, url: /^https?:\/\//i.test(path) ? path : `${host}/file=${path.replace(/^\//, "")}`, orig_name: file.name, size: file.size, mime_type: file.type || "application/octet-stream" };
+    } catch (error) { lastError = error; if (![404, 405].includes(error.status)) break; }
+  }
+  throw lastError || new Error("Could not upload file input.");
+}
+function parseSseEvents(response, onProgress) {
+  const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ""; let lastData = null;
+  return (async () => {
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+      const blocks = buffer.split("\n\n"); buffer = blocks.pop() || "";
+      for (const block of blocks) {
+        const lines = block.split(/\r?\n/); let event = "message"; const dataLines = [];
+        for (const line of lines) { if (line.startsWith("event:")) event = line.slice(6).trim(); else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim()); }
+        if (!dataLines.length) continue;
+        const dataText = dataLines.join("\n");
+        if (dataText === "[DONE]") return lastData;
+        let payload; try { payload = JSON.parse(dataText); } catch { payload = { raw: dataText }; }
+        if (event === "error" || payload?.msg === "unexpected_error" || payload?.success === false) throw new Error(payload?.message || payload?.error || payload?.raw || "Gradio endpoint returned an error.");
+        if (["process_completed", "complete", "success"].includes(event) || payload?.is_generating === false && payload?.data) {
+          lastData = payload?.output?.data ?? payload?.data ?? payload;
+          if (event === "process_completed" || payload?.success !== false) return lastData;
+        }
+        if (event === "process_generating" || event === "heartbeat" || event === "estimation") onProgress?.(payload);
+      }
+      if (done) break;
+    }
+    if (lastData != null) return lastData;
+    throw new Error("Gradio stream ended before a completed output was received.");
+  })();
+}
+async function callGradio(model, endpoint, values, job, headers) {
+  const data = [];
+  const files = jobFiles.get(job.id) || new Map();
+  for (const field of endpoint.fields) {
+    if (field.hidden) { data.push(field.passthrough ?? field.defaultValue ?? null); continue; }
+    let value = values[field.key];
+    if (["image", "video", "audio", "file"].includes(field.type)) {
+      const file = files.get(field.key);
+      if (file) value = await uploadFile(file, model.host, model.apiPrefix || "/gradio_api", headers);
+      else if (value?.path || value?.url) value = value;
+      else if (value?.name) throw new Error(`File “${value.name}” is not available in memory. Reattach it by cloning the job before retrying.`);
+      else value = null;
+    }
+    data.push(value ?? null);
+  }
+  const sessionHash = Math.random().toString(36).slice(2, 12);
+  const api = encodeURIComponent(endpoint.apiName);
+  const prefix = model.apiPrefix || "/gradio_api";
+  let response;
+  try {
+    response = await fetch(`${model.host}${prefix}/call/${api}`, { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify({ data, session_hash: sessionHash }) });
+  } catch (error) { throw new Error(`Could not reach the Space. Check its availability and browser CORS settings. ${error.message}`); }
+  if (response.ok) {
+    let initial;
+    try { initial = await response.json(); } catch {}
+    if (initial?.event_id) {
+      const stream = await fetch(`${model.host}${prefix}/call/${api}/${encodeURIComponent(initial.event_id)}`, { headers });
+      if (!stream.ok) { const text = (await stream.text()).slice(0, 600); const err = new Error(text || `Result stream failed (HTTP ${stream.status})`); err.status = stream.status; throw err; }
+      return await parseSseEvents(stream, (payload) => { job.progress = typeof payload?.progress === "number" ? payload.progress : job.progress; job.updatedAt = Date.now(); saveState(); });
+    }
+    if (initial?.data) return initial.data;
+    if (initial?.output?.data) return initial.output.data;
+  }
+  // Older Gradio builds expose the synchronous run endpoint instead of /call.
+  if ([404, 405, 501].includes(response.status)) {
+    const fallback = await fetch(`${model.host}${prefix}/run/${api}`, { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify({ data, session_hash: sessionHash }) });
+    if (!fallback.ok) { const message = (await fallback.text()).slice(0, 700); const err = new Error(message || `Generation failed (HTTP ${fallback.status})`); err.status = fallback.status; throw err; }
+    const output = await fallback.json();
+    if (output?.error) throw new Error(typeof output.error === "string" ? output.error : JSON.stringify(output.error));
+    return output?.data ?? output?.output?.data ?? output;
+  }
+  const message = response.ok ? "Gradio did not return an event id or output." : (await response.text()).slice(0, 700);
+  const error = new Error(message || `Generation failed (HTTP ${response.status})`); error.status = response.status; throw error;
+}
+async function runQueue() {
+  if (queueBusy) return;
+  queueHalted = false; queueBusy = true; clearNotice(); render();
+  try {
+    while (!queueHalted) {
+      const job = state.jobs.find((item) => ["ready", "retry"].includes(item.status));
+      if (!job) break;
+      const model = getModel(job.modelId); const endpoint = endpointFor(model, job.apiName);
+      if (!model || !endpoint) { job.status = "failed"; job.error = "Saved Space or endpoint was removed. Rediscover the Space and clone the job."; job.updatedAt = Date.now(); saveState(); continue; }
+      if (!jobFiles.has(job.id) && (job.files || []).length) {
+        const missing = (job.files || []).some((key) => job.values?.[key]?.name);
+        if (missing) { job.status = "paused"; job.error = "Local file inputs are no longer in memory. Clone this job and reattach files before retrying."; job.updatedAt = Date.now(); saveState(); continue; }
+      }
+      if (job.accountId && (!accountTokens.has(job.accountId) || !getAccount(job.accountId)?.enabled)) {
+        job.status = "paused"; job.error = "The selected account is not connected in this browser session. Connect it and retry this job."; job.updatedAt = Date.now(); saveState(); continue;
+      }
+      job.status = "running"; job.error = ""; job.progress = 0; job.startedAt = Date.now(); job.updatedAt = Date.now(); saveState(); render();
+      try {
+        const headers = await authHeaders(job.accountId);
+        const raw = await callGradio(model, endpoint, job.values || {}, job, headers);
+        job.result = normalizeOutputs(raw, "Output", model.host);
+        job.status = "done"; job.error = ""; job.finishedAt = Date.now(); job.updatedAt = Date.now(); job.progress = 1; saveState(); ping(`Completed: ${job.name || model.title}`);
+      } catch (error) {
+        const kind = classifyFailure(error.status, error.message || String(error));
+        const reset = error?.resetAt || null;
+        const until = holdFor(kind, error.message || "", reset);
+        job.error = `[${kind.toUpperCase()}] ${error.message || String(error)}`; job.updatedAt = Date.now();
+        if (kind === "quota") {
+          job.status = "paused"; job.quotaResetAt = until; queueHalted = true;
+          showNotice("Quota/resource exhaustion detected. The job and queue are paused. No reset time was guessed and no other account was selected automatically.", "error");
+        } else if (kind === "waking" || kind === "transient") {
+          job.status = "paused"; queueHalted = true;
+          showNotice(`${kind === "waking" ? "The Space appears to be waking or loading." : "A transient/network error interrupted this job."} It is paused for a manual retry.`, "error");
+        } else if (kind === "auth") {
+          job.status = "paused"; queueHalted = true;
+          showNotice("Authentication failed. Check the selected account token and retry manually; account switching is not automatic.", "error");
+        } else {
+          job.status = "failed";
+          if (kind === "policy") showNotice("The Space refused the request under its policy/safety rules. Review the prompt and the Space's own terms before retrying.", "error");
+        }
+        saveState();
+      }
+      render();
+      if (queueHalted) break;
+    }
+  } finally {
+    queueBusy = false; render();
+    if (!queueHalted) ping("Queue run finished.");
+  }
+}
+function exportWorkspace() {
+  const blob = new Blob([JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), workspace: { ...state, accounts: state.accounts.map(({ token, connected, ...account }) => ({ ...account, connected: false })) } }, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = `multi-hf-workspace-${new Date().toISOString().slice(0, 10)}.json`; a.click(); URL.revokeObjectURL(url); ping("Workspace exported. Account tokens are excluded.");
+}
+function importWorkspace(data) {
+  const imported = data?.workspace || data;
+  if (!imported || !Array.isArray(imported.models) || !Array.isArray(imported.jobs) || !Array.isArray(imported.profiles)) throw new Error("This file is not a Multi-HF workspace export.");
+  if (!confirm("Import this workspace and replace the current models, profiles, jobs, and account labels? Tokens will not be imported.")) return;
+  state = { models: imported.models, profiles: imported.profiles, jobs: imported.jobs, accounts: (imported.accounts || []).map((a) => ({ ...a, connected: false })), settings: imported.settings || { lastAccountId: "" } };
+  accountTokens.clear(); jobFiles.clear(); saveState(); render(); ping("Workspace imported. Reconnect accounts to use private Spaces.");
+}
+document.querySelectorAll("[data-tab]").forEach((button) => button.addEventListener("click", () => { currentTab = button.dataset.tab; render(); }));
+document.querySelector("#quick-add").addEventListener("click", () => openNewJob());
+document.querySelector("#export-data").addEventListener("click", exportWorkspace);
+document.querySelector("#import-data").addEventListener("click", () => document.querySelector("#import-file").click());
+document.querySelector("#import-file").addEventListener("change", async (event) => {
+  const file = event.target.files?.[0]; if (!file) return;
+  try { importWorkspace(JSON.parse(await file.text())); } catch (error) { ping(error.message || "Could not import this file."); }
+  event.target.value = "";
+});
+dialog.addEventListener("click", (event) => { if (event.target === dialog) dialog.close(); });
+document.addEventListener("keydown", (event) => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "j") { event.preventDefault(); openNewJob(); } });
+
+render();
+
+if ("serviceWorker" in navigator && location.protocol !== "file:") navigator.serviceWorker.register("/service-worker.js").catch(() => {});
