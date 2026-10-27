@@ -41,6 +41,11 @@ class MainActivity : Activity() {
         webView.settings.javaScriptCanOpenWindowsAutomatically = false
         webView.settings.setSupportMultipleWindows(false)
         webView.setBackgroundColor(android.graphics.Color.rgb(13, 17, 23))
+        // <a download> links hand off to the system browser/download manager.
+        webView.setDownloadListener { url, _, _, _, _ ->
+            val uri = Uri.parse(url)
+            if (uri.scheme == "https") openExternal(uri)
+        }
         webView.webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest) =
                 assetLoader.shouldInterceptRequest(request.url)
@@ -48,10 +53,6 @@ class MainActivity : Activity() {
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest): Boolean {
                 val uri = request.url
                 if (uri.host == appHost && uri.scheme == "https") return false
-                if (uri.scheme == "https" && (uri.host == "huggingface.co" || uri.host == "hf.co" || uri.host?.endsWith(".hf.space") == true)) {
-                    openExternal(uri)
-                    return true
-                }
                 if (uri.scheme == "https" || uri.scheme == "http") {
                     openExternal(uri)
                     return true

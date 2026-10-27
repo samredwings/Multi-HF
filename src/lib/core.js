@@ -200,3 +200,142 @@ export function normalizeOutputs(value, label = "Output", baseUrl = "") {
   return [{ kind: "text", text: JSON.stringify(rec).slice(0, 5000), label }];
 }
 export function safeId(prefix = "id") { return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`; }
+
+// ---------------------------------------------------------------------------
+// Token policy: a token may go to the Hub API, and to a *.hf.space host only
+// when the Hub reported that Space as private. Anyone can publish a public
+// Space, so public hosts must never receive a user's token.
+export function tokenHeaders(token, url, { privateSpace = false } = {}) {
+  if (!token) return {};
+  let target;
+  try { target = new URL(url); } catch { return {}; }
+  if (target.protocol !== "https:" || target.username || target.password || target.port) return {};
+  const host = target.hostname.toLowerCase();
+  if (host === "huggingface.co" || host === "www.huggingface.co") return { Authorization: `Bearer ${token}` };
+  if (privateSpace && /^[a-z0-9-]+\.hf\.space$/.test(host)) return { Authorization: `Bearer ${token}` };
+  return {};
+}
+
+// ---------------------------------------------------------------------------
+// Storage / import hygiene
+const MAX_INLINE_STORED = 50_000;
+const JOB_STATUSES = new Set(["ready", "retry", "running", "done", "failed", "paused"]);
+const RESULT_KINDS = new Set(["image", "video", "audio", "file", "text"]);
+const FIELD_TYPES = new Set(["text", "textarea", "number", "slider", "checkbox", "checkboxgroup", "select", "radio", "image", "video", "audio", "file"]);
+const text = (value, max = 500) => (typeof value === "string" ? value.slice(0, max) : "");
+const finite = (value) => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
+
+/** Large inline (data:) media would blow the localStorage quota; keep a note instead. */
+export function persistableResult(result) {
+  if (!Array.isArray(result)) return [];
+  return result.map((item) => (typeof item?.url === "string" && item.url.startsWith("data:") && item.url.length > MAX_INLINE_STORED
+    ? { kind: "text", label: item.label || "Output", text: "Inline media was too large to store in this browser. Re-run the job to regenerate it." }
+    : item));
+}
+
+/** A job left in "running" by a closed tab must not be stuck forever, and must not silently re-spend quota. */
+export function recoverRunningJobs(jobs, now = Date.now()) {
+  return (Array.isArray(jobs) ? jobs : []).map((job) => (job?.status === "running"
+    ? { ...job, status: "paused", error: "Interrupted by a page reload. Retry when ready.", updatedAt: now }
+    : job));
+}
+
+function cleanEndpoint(raw) {
+  const ep = record(raw);
+  if (!ep || typeof ep.apiName !== "string" || !/^[\w.-]+$/.test(ep.apiName)) return null;
+  const fields = (Array.isArray(ep.fields) ? ep.fields : []).map(record).filter((f) => f && typeof f.key === "string" && /^c\d+$/.test(f.key) && FIELD_TYPES.has(f.type));
+  const outputs = (Array.isArray(ep.outputs) ? ep.outputs : []).map(record).filter((o) => o && typeof o.key === "string").map((o) => ({ key: o.key, label: text(o.label, 120) || "Output", type: text(o.type, 40) || "text" }));
+  return { apiName: ep.apiName, fields: fields.map((f) => ({ ...f, choices: Array.isArray(f.choices) ? f.choices : [] })), outputs };
+}
+function cleanResult(raw) {
+  const item = record(raw);
+  if (!item || !RESULT_KINDS.has(item.kind)) return null;
+  if (item.kind === "text") return { kind: "text", text: text(item.text, 5000), label: text(item.label, 120) || "Output" };
+  const url = text(item.url, 2_000_000);
+  if (!/^(https:\/\/|data:(image|video|audio)\/)/i.test(url)) return null;
+  return { kind: item.kind, url, label: text(item.label, 120) || "Output" };
+}
+
+/** Validate an imported workspace. Hosts are re-checked, so a crafted file cannot aim a saved token at another site. */
+export function sanitizeWorkspace(data) {
+  const root = record(data?.workspace) ?? record(data);
+  if (!root || !Array.isArray(root.models) || !Array.isArray(root.jobs) || !Array.isArray(root.profiles)) throw new Error("This file is not a Multi-HF workspace export.");
+  const models = [];
+  for (const raw of root.models) {
+    const m = record(raw);
+    if (!m || typeof m.id !== "string") continue;
+    const host = normalizeHost(m.host);
+    if (!host) continue;
+    const endpoints = (Array.isArray(m.endpoints) ? m.endpoints : []).map(cleanEndpoint).filter(Boolean);
+    if (!endpoints.length) continue;
+    models.push({
+      id: text(m.id, 200), kind: "space", host, endpoints,
+      ref: /^[\w.-]+\/[\w.-]+$/.test(m.ref ?? "") ? m.ref : "",
+      title: text(m.title, 200) || host, note: text(m.note, 200),
+      task: ["image", "video", "other"].includes(m.task) ? m.task : "other",
+      apiPrefix: /^\/[\w./-]*$/.test(m.apiPrefix ?? "") ? m.apiPrefix : "/gradio_api",
+      activeApi: endpoints.some((e) => e.apiName === m.activeApi) ? m.activeApi : endpoints[0].apiName,
+      accountId: text(m.accountId, 100), hardware: text(m.hardware, 80) || "Unknown",
+      fetchedAt: finite(m.fetchedAt) ?? 0, private: m.private === true,
+    });
+  }
+  const known = new Set(models.map((m) => m.id));
+  const profiles = root.profiles.map(record).filter((p) => p && typeof p.id === "string" && known.has(p.modelId)).map((p) => ({
+    id: text(p.id, 100), name: text(p.name, 120), modelId: p.modelId, apiName: text(p.apiName, 100),
+    values: record(p.values) ?? {}, accountId: text(p.accountId, 100), createdAt: finite(p.createdAt) ?? 0, updatedAt: finite(p.updatedAt) ?? 0,
+  }));
+  const jobs = root.jobs.map(record).filter((j) => j && typeof j.id === "string" && known.has(j.modelId)).map((j) => ({
+    id: text(j.id, 100), name: text(j.name, 200), modelId: j.modelId, apiName: text(j.apiName, 100), accountId: text(j.accountId, 100),
+    values: record(j.values) ?? {}, files: Array.isArray(j.files) ? j.files.filter((f) => typeof f === "string") : [],
+    status: JOB_STATUSES.has(j.status) ? j.status : "failed", error: text(j.error, 2000),
+    result: (Array.isArray(j.result) ? j.result : []).map(cleanResult).filter(Boolean),
+    createdAt: finite(j.createdAt) ?? 0, updatedAt: finite(j.updatedAt) ?? 0, startedAt: finite(j.startedAt), finishedAt: finite(j.finishedAt),
+    progress: finite(j.progress), attempts: 0,
+  }));
+  const accounts = (Array.isArray(root.accounts) ? root.accounts : []).map(record).filter((a) => a && typeof a.id === "string").map((a) => ({
+    id: text(a.id, 100), label: text(a.label, 60) || "Account", username: text(a.username, 80), enabled: a.enabled !== false, createdAt: finite(a.createdAt) ?? 0, connected: false,
+  }));
+  return { models, profiles, jobs: recoverRunningJobs(jobs), accounts, settings: { lastAccountId: text(record(root.settings)?.lastAccountId, 100) } };
+}
+
+// ---------------------------------------------------------------------------
+// Gradio SSE reader (handles LF and CRLF, string error payloads, `generating` events)
+function errorMessage(payload) {
+  if (typeof payload === "string") return payload;
+  const raw = payload?.message ?? payload?.error ?? payload?.output?.error ?? (payload?.raw && payload.raw !== "null" ? payload.raw : "");
+  return typeof raw === "string" && raw ? raw : "Gradio endpoint returned an error (the Space gave no details).";
+}
+export async function readGradioStream(response, onProgress) {
+  if (!response.body) throw new Error("The Space returned an empty result stream.");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = ""; let lastData = null;
+  const handle = (block) => {
+    let event = "message"; const dataLines = [];
+    for (const line of block.split("\n")) {
+      if (line.startsWith("event:")) event = line.slice(6).trim();
+      else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+    }
+    if (!dataLines.length) return { done: false };
+    const dataText = dataLines.join("\n");
+    if (dataText === "[DONE]") return { done: true, data: lastData };
+    let payload; try { payload = JSON.parse(dataText); } catch { payload = { raw: dataText }; }
+    if (event === "error" || payload?.msg === "unexpected_error" || (payload && !Array.isArray(payload) && payload.success === false)) throw new Error(errorMessage(payload));
+    if (event === "complete" || event === "process_completed") return { done: true, data: payload?.output?.data ?? payload?.data ?? payload };
+    if (event === "message" && payload?.is_generating === false && payload?.data) lastData = payload.data;
+    if (["generating", "process_generating", "heartbeat", "estimation"].includes(event)) onProgress?.(payload);
+    return { done: false };
+  };
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer = (buffer + decoder.decode(value || new Uint8Array(), { stream: !done })).replace(/\r\n/g, "\n");
+      const blocks = buffer.split("\n\n"); buffer = blocks.pop() ?? "";
+      if (done && buffer.trim()) { blocks.push(buffer); buffer = ""; }
+      for (const block of blocks) { const result = handle(block); if (result.done) return result.data; }
+      if (done) break;
+    }
+  } finally { reader.cancel().catch(() => {}); }
+  if (lastData != null) return lastData;
+  throw new Error("Gradio stream ended before a completed output was received.");
+}
