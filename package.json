@@ -1,0 +1,14 @@
+{
+  "name": "multi-hf",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local-first Hugging Face Gradio queue manager",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test",
+    "check": "node --check src/app.js && node --check src/lib/core.js && node --check scripts/build.mjs",
+    "preview": "node scripts/preview.mjs"
+  },
+  "engines": { "node": ">=20" }
+}
