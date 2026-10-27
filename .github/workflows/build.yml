@@ -68,3 +68,60 @@ jobs:
           path: |
             dist/
             android/app/build/outputs/apk/debug/app-debug.apk
+
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v4
+
+      - name: Download Android build
+        uses: actions/download-artifact@v4
+        with:
+          name: multi-hf-build
+          path: .
+
+      - name: Create versioned release and attach APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(node -p "JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).version")"
+          tag="v${version}"
+          apk_path="android/app/build/outputs/apk/debug/app-debug.apk"
+          apk_name="Multi-HF-v${version}-debug.apk"
+          test -f "$apk_path"
+
+          if release_json="$(curl --silent --show-error --fail \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" 2>/dev/null)"; then
+            if jq -e --arg name "$apk_name" '.assets[]? | select(.name == $name)' <<<"$release_json" >/dev/null; then
+              echo "Release $tag already includes $apk_name; nothing to upload."
+              exit 0
+            fi
+          else
+            payload="$(jq -nc --arg tag "$tag" --arg commit "$GITHUB_SHA" --arg name "Multi-HF $tag" \
+              '{tag_name:$tag,name:$name,target_commitish:$commit,draft:false,prerelease:false,generate_release_notes:true}')"
+            release_json="$(curl --silent --show-error --fail -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              -H "Content-Type: application/json" \
+              -d "$payload" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases")"
+          fi
+
+          release_id="$(jq -r '.id' <<<"$release_json")"
+          curl --silent --show-error --fail -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/vnd.android.package-archive" \
+            --data-binary "@$apk_path" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${apk_name}"
