@@ -74,6 +74,18 @@ function showDialog(content) {
   if (!dialog.open) dialog.showModal();
   dialogContent.querySelectorAll("[data-close]").forEach((button) => button.addEventListener("click", () => dialog.close()));
 }
+// A modal <dialog> sits in the top layer, so toasts are hidden behind it. Show errors inside the dialog instead.
+function dialogError(message) {
+  console.error("[Multi-HF]", message);
+  const inner = dialogContent.querySelector(".dialog-inner");
+  if (!inner) { ping(message); return; }
+  let box = inner.querySelector("#dialog-error");
+  if (!box) {
+    box = document.createElement("div"); box.id = "dialog-error"; box.className = "notice error"; box.setAttribute("role", "alert"); box.style.marginBottom = "14px";
+    inner.querySelector(".dialog-header")?.after(box);
+  }
+  box.textContent = message; box.hidden = false; box.scrollIntoView?.({ block: "nearest" });
+}
 function dialogHeader(title, description = "") {
   return `<div class="dialog-header"><div><h2>${escapeHtml(title)}</h2><p>${escapeHtml(description)}</p></div><button class="close" type="button" data-close aria-label="Close dialog">✕</button></div>`;
 }
@@ -185,8 +197,9 @@ function openAccountDialog(existing = null) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const label = String(form.get("label") || "").trim(); const username = String(form.get("username") || "").trim(); const token = String(form.get("token") || "").trim();
-    if (!token) { ping("Enter a token to connect this session."); return; }
+    if (!token) { dialogError("Enter a token to connect this session."); return; }
     let account = existing ? getAccount(existing.id) : null;
+    const created = !account;
     if (!account) { account = { id: safeId("account"), label, username, enabled: true, createdAt: Date.now(), connected: false }; state.accounts.push(account); }
     account.label = label; account.username = username; account.connected = true; account.enabled = true; accountTokens.set(account.id, token); state.settings.lastAccountId = account.id;
     const submit = event.currentTarget.querySelector("[type=submit]"); submit.disabled = true; submit.textContent = "Checking token…";
@@ -201,7 +214,9 @@ function openAccountDialog(existing = null) {
         // A CORS/network failure does not prove a token is invalid. Keep the token session-only but warn.
         saveState(); dialog.close(); render(); showNotice("Token could not be verified from this browser (network/CORS). It remains session-only; try a public Space or inspect browser/network permissions.", "error");
       } else {
-        accountTokens.delete(account.id); account.connected = false; saveState(); submit.disabled = false; submit.textContent = "Connect session"; ping(error.message || "Token check failed.");
+        accountTokens.delete(account.id); account.connected = false;
+        if (created) state.accounts = state.accounts.filter((a) => a.id !== account.id);
+        saveState(); submit.disabled = false; submit.textContent = "Connect session"; dialogError(error.message || "Token check failed.");
       }
     }
   });
@@ -209,12 +224,12 @@ function openAccountDialog(existing = null) {
 function openAddSpace() {
   const accounts = [{ id: "", label: "Public / no token" }, ...connectedAccounts().map((a) => ({ id: a.id, label: a.label }))];
   showDialog(`${dialogHeader("Discover a Hugging Face Space", "Multi-HF reads the live Gradio /config schema and builds an endpoint form.")}
-  <form id="space-form"><div class="field-grid"><div class="field full"><label for="space-ref">Space URL or owner/name</label><input id="space-ref" name="ref" required placeholder="owner/space-name or https://huggingface.co/spaces/owner/name"><small>Public Spaces work without a token. CORS or private-space permissions can still block browser access.</small></div><div class="field"><label for="space-account">Use account</label><select id="space-account" name="accountId">${accounts.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.label)}</option>`).join("")}</select></div><div class="field"><label for="space-note">Optional label</label><input id="space-note" name="note" maxlength="90" placeholder="My animation Space"></div></div><div class="form-actions"><button class="button" type="button" data-close>Cancel</button><button class="button button-primary" type="submit">Discover Space</button></div></form>`);
+  <form id="space-form"><div class="field-grid"><div class="field full"><label for="space-ref">Space URL or owner/name</label><input id="space-ref" name="ref" required placeholder="owner/space-name or https://huggingface.co/spaces/owner/name"><small>Public Spaces work without a token. ${connectedAccounts().length ? "" : "For a private Space, first connect your token under Accounts. "}CORS or private-space permissions can still block browser access.</small></div><div class="field"><label for="space-account">Use account</label><select id="space-account" name="accountId">${accounts.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.label)}</option>`).join("")}</select></div><div class="field"><label for="space-note">Optional label</label><input id="space-note" name="note" maxlength="90" placeholder="My animation Space"></div></div><div class="form-actions"><button class="button" type="button" data-close>Cancel</button><button class="button button-primary" type="submit">Discover Space</button></div></form>`);
   document.querySelector("#space-form").addEventListener("submit", async (event) => {
     event.preventDefault(); const form = new FormData(event.currentTarget); const ref = String(form.get("ref") || "").trim(); const accountId = String(form.get("accountId") || ""); const note = String(form.get("note") || "").trim();
     const submit = event.currentTarget.querySelector("[type=submit]"); submit.disabled = true; submit.textContent = "Discovering…";
     try { await discoverSpace(null, { ref, accountId, note }); dialog.close(); }
-    catch (error) { submit.disabled = false; submit.textContent = "Discover Space"; ping(error.message || "Space discovery failed."); }
+    catch (error) { submit.disabled = false; submit.textContent = "Discover Space"; dialogError(error.message || "Space discovery failed."); }
   });
 }
 // Tokens only go to huggingface.co, or to a *.hf.space host the Hub reported as private.
@@ -352,7 +367,7 @@ function openNewJob(modelId = null, profile = null) {
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     const chosen = getModel(modelSelect.value); const ep = endpointFor(chosen, apiSelect.value);
-    if (!chosen || !ep) { ping("Select a valid Space endpoint."); return; }
+    if (!chosen || !ep) { dialogError("Select a valid Space endpoint."); return; }
     const values = collectValues(form, ep, files);
     const name = String(new FormData(form).get("name") || values.prompt || ep.apiName).trim();
     const jobId = safeId("job");
