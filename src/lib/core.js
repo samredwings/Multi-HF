@@ -109,6 +109,9 @@ function score(endpoint) {
   if (endpoint.fields.some((field) => !field.hidden && ["textarea", "image", "text"].includes(field.type))) value += 6;
   return value;
 }
+function isExampleLoader(apiName) {
+  return /^load_example(?:_(?:input|output))?(?:_\d+)?$/i.test(apiName);
+}
 export function parseSpaceConfig(config) {
   const root = record(config);
   if (!root || !Array.isArray(root.components)) throw new Error("This Space did not return a valid Gradio /config document.");
@@ -119,7 +122,11 @@ export function parseSpaceConfig(config) {
     const dep = record(rawDep);
     if (!dep) continue;
     const apiName = typeof dep.api_name === "string" ? dep.api_name.replace(/^\//, "") : "";
-    if (!apiName || ["false", "null", "lambda"].includes(apiName) || apiName.startsWith("_") || apiName.startsWith("js_") || !/^[\w.-]+$/.test(apiName)) continue;
+    // These are UI helpers, not generation APIs. Gradio publishes them in
+    // /config alongside real endpoints (often with image/video outputs), so
+    // scoring alone can incorrectly select one as the Space's main endpoint.
+    if (!apiName || isExampleLoader(apiName) || ["false", "null", "lambda"].includes(apiName) || apiName.startsWith("_") || apiName.startsWith("js_") || !/^[\w.-]+$/.test(apiName)) continue;
+    if (dep.backend_fn === false || dep.api_visibility === "private") continue;
     const inputs = Array.isArray(dep.inputs) ? dep.inputs.filter((id) => typeof id === "number") : [];
     const outputs = Array.isArray(dep.outputs) ? dep.outputs.filter((id) => typeof id === "number") : [];
     if (!outputs.length) continue;
@@ -300,10 +307,17 @@ export function sanitizeWorkspace(data) {
 
 // ---------------------------------------------------------------------------
 // Gradio SSE reader (handles LF and CRLF, string error payloads, `generating` events)
-function errorMessage(payload) {
+export function errorMessage(payload) {
   if (typeof payload === "string") return payload;
-  const raw = payload?.message ?? payload?.error ?? payload?.output?.error ?? (payload?.raw && payload.raw !== "null" ? payload.raw : "");
-  return typeof raw === "string" && raw ? raw : "Gradio endpoint returned an error (the Space gave no details).";
+  const raw = payload?.message ?? payload?.detail?.message ?? payload?.detail ?? payload?.error?.message ?? payload?.error ?? payload?.output?.error ?? payload?.output?.message ?? payload?.data?.error ?? payload?.msg ?? (payload?.raw && payload.raw !== "null" ? payload.raw : "");
+  if (typeof raw === "string" && raw.trim()) return raw.trim().slice(0, 2000);
+  if (raw && typeof raw === "object") {
+    try { return JSON.stringify(raw).slice(0, 2000); } catch {}
+  }
+  if (payload && typeof payload === "object") {
+    try { return JSON.stringify(payload).slice(0, 2000); } catch {}
+  }
+  return "Gradio endpoint returned an error (the Space gave no details).";
 }
 export async function readGradioStream(response, onProgress) {
   if (!response.body) throw new Error("The Space returned an empty result stream.");

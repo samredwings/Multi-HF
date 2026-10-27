@@ -1,6 +1,6 @@
 import {
   parseSpaceInput, normalizeHost, parseSpaceConfig, taskFromEndpoints, classifyFailure,
-  holdFor, normalizeOutputs, safeId, tokenHeaders, persistableResult, recoverRunningJobs, sanitizeWorkspace, readGradioStream,
+  holdFor, normalizeOutputs, safeId, tokenHeaders, persistableResult, recoverRunningJobs, sanitizeWorkspace, readGradioStream, errorMessage,
 } from "./lib/core.js";
 
 const STORAGE_KEY = "multi-hf.workspace.v1";
@@ -301,7 +301,10 @@ async function discoverSpace(modelId = null, options = {}) {
   saveState(); render(); ping(`Discovered ${model.title}: ${model.endpoints.length} API endpoints.`);
   return model;
 }
-function endpointFor(model, apiName) { return model?.endpoints?.find((endpoint) => endpoint.apiName === apiName) || model?.endpoints?.[0]; }
+function endpointFor(model, apiName, fallback = true) {
+  const exact = model?.endpoints?.find((endpoint) => endpoint.apiName === apiName);
+  return exact || (fallback ? model?.endpoints?.[0] : undefined);
+}
 function inputElement(field, value, profileMode = false) {
   if (field.hidden) return "";
   const id = `f-${field.key}`;
@@ -435,6 +438,9 @@ async function uploadFile(file, host, apiPrefix, headers, signal) {
   throw lastError || new Error("Could not upload file input.");
 }
 async function callGradio(model, endpoint, values, job, headers, signal) {
+  if (/^load_example(?:_(?:input|output))?(?:_\d+)?$/i.test(endpoint.apiName)) {
+    throw new Error("This Space endpoint only loads a Gradio example; it cannot generate output. Refresh the Space schema and choose its inference endpoint.");
+  }
   const data = [];
   const files = jobFiles.get(job.id) || new Map();
   for (const field of endpoint.fields) {
@@ -459,6 +465,7 @@ async function callGradio(model, endpoint, values, job, headers, signal) {
   if (response.ok) {
     let initial;
     try { initial = await response.json(); } catch {}
+    if (initial?.error || initial?.success === false) throw new Error(errorMessage(initial));
     if (initial?.event_id) {
       const stream = await fetch(`${model.host}${prefix}/call/${api}/${encodeURIComponent(initial.event_id)}`, { headers, signal });
       if (!stream.ok) { const text = (await stream.text()).slice(0, 600); const err = new Error(text || `Result stream failed (HTTP ${stream.status})`); err.status = stream.status; throw err; }
@@ -492,8 +499,8 @@ async function runQueue() {
     while (!queueHalted) {
       const job = state.jobs.find((item) => ["ready", "retry"].includes(item.status));
       if (!job) break;
-      const model = getModel(job.modelId); const endpoint = endpointFor(model, job.apiName);
-      if (!model || !endpoint) { job.status = "failed"; job.error = "Saved Space or endpoint was removed. Rediscover the Space and clone the job."; job.updatedAt = Date.now(); saveState(); continue; }
+      const model = getModel(job.modelId); const endpoint = endpointFor(model, job.apiName, false);
+      if (!model || !endpoint) { job.status = "failed"; job.error = `Saved Space endpoint /${job.apiName} is no longer available. Refresh the Space schema and clone this job using a generation endpoint.`; job.updatedAt = Date.now(); saveState(); continue; }
       const host = normalizeHost(model.host);
       if (!host) { job.status = "failed"; job.error = "Saved Space host is not a valid *.hf.space address. Rediscover the Space and clone the job."; job.updatedAt = Date.now(); saveState(); continue; }
       if (!jobFiles.has(job.id) && (job.files || []).length) {
