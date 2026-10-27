@@ -8,7 +8,9 @@ const run = (command, args) => {
 };
 run(process.execPath, ["scripts/build.mjs"]);
 const dist = resolve(root, "dist");
-const assets = resolve(root, "android/app/src/main/assets/www");
+// MainActivity maps the Android asset root to https://appassets.androidplatform.net/,
+// so copy index.html, src/, and the PWA files directly into assets/.
+const assets = resolve(root, "android/app/src/main/assets");
 await stat(resolve(dist, "index.html"));
 await rm(assets, { recursive: true, force: true });
 await mkdir(assets, { recursive: true });
