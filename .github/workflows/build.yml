@@ -1,0 +1,82 @@
+name: Build and test
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Restore the app source tree on first run
+        shell: bash
+        run: |
+          if [ ! -f src/app.js ]; then
+            cat bootstrap/chunk-*.b64 | tr -d '\r\n ' | base64 --decode > "$RUNNER_TEMP/Multi-HF-source.zip"
+            unzip -t "$RUNNER_TEMP/Multi-HF-source.zip"
+            unzip -oq "$RUNNER_TEMP/Multi-HF-source.zip" -d .
+            rm -rf bootstrap
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -A
+            git commit -m "build: bootstrap Multi-HF source project"
+            git push origin HEAD:main
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check JavaScript syntax
+        run: npm run check
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build static web app
+        run: npm run build
+
+      - name: Prepare Android WebView assets
+        run: npm run build:android-assets
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK components
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Install Gradle 8.9
+        shell: bash
+        run: |
+          curl -fsSL https://services.gradle.org/distributions/gradle-8.9-bin.zip -o "$RUNNER_TEMP/gradle.zip"
+          unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/gradle-8.9/bin" >> "$GITHUB_PATH"
+
+      - name: Assemble Android debug APK
+        working-directory: android
+        run: gradle --no-daemon --stacktrace assembleDebug
+
+      - name: Upload web build and Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: multi-hf-build
+          if-no-files-found: error
+          path: |
+            dist/
+            android/app/build/outputs/apk/debug/app-debug.apk
