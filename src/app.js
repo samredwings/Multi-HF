@@ -15,6 +15,7 @@ const accountSummary = document.querySelector("#account-summary");
 const accountTokens = new Map();
 const jobFiles = new Map();
 let currentTab = "queue";
+let currentSpaceUi = null;
 let queueBusy = false;
 let queueHalted = false;
 let currentAbort = null;
@@ -90,13 +91,16 @@ function dialogHeader(title, description = "") {
   return `<div class="dialog-header"><div><h2>${escapeHtml(title)}</h2><p>${escapeHtml(description)}</p></div><button class="close" type="button" data-close aria-label="Close dialog">✕</button></div>`;
 }
 function render() {
+  const spaceUiModel = currentSpaceUi ? getModel(currentSpaceUi) : null;
+  if (currentSpaceUi && !spaceUiModel) currentSpaceUi = null;
   const title = { queue: "Generation queue", jobs: "Job history", models: "Spaces & models", profiles: "Generation profiles", accounts: "Hugging Face accounts" }[currentTab];
-  pageTitle.textContent = title;
-  document.querySelectorAll("[data-tab]").forEach((button) => button.classList.toggle("active", button.dataset.tab === currentTab));
+  pageTitle.textContent = spaceUiModel ? `${spaceUiModel.title} · Model interface` : title;
+  document.querySelectorAll("[data-tab]").forEach((button) => button.classList.toggle("active", !spaceUiModel && button.dataset.tab === currentTab));
   navCount.textContent = String(waitingJobs().length);
   const connected = connectedAccounts().length;
   accountSummary.textContent = connected ? `${connected} account${connected === 1 ? "" : "s"} connected` : "No account connected";
-  if (currentTab === "queue") renderQueue();
+  if (spaceUiModel) renderSpaceUi(spaceUiModel);
+  else if (currentTab === "queue") renderQueue();
   else if (currentTab === "jobs") renderJobs();
   else if (currentTab === "models") renderModels();
   else if (currentTab === "profiles") renderProfiles();
@@ -149,12 +153,47 @@ function renderJobs() {
   document.querySelector("#jobs-clear")?.addEventListener("click", () => { state.jobs = state.jobs.filter((job) => job.status !== "done"); saveState(); render(); ping("Completed jobs cleared."); });
   bindJobActions();
 }
+function renderSpaceUi(model) {
+  const host = normalizeHost(model?.host);
+  if (!host) {
+    view.innerHTML = `<div class="panel"><div class="empty"><div class="empty-mark">!</div><strong>This Space has no valid live UI address</strong><p>Refresh the Space schema, then try again.</p><button class="button button-primary" id="space-ui-back">Back to workspace</button></div></div>`;
+    document.querySelector("#space-ui-back")?.addEventListener("click", () => { currentSpaceUi = null; currentTab = "models"; render(); });
+    return;
+  }
+  const standaloneUrl = model.ref
+    ? `https://huggingface.co/spaces/${model.ref.split("/").map(encodeURIComponent).join("/")}`
+    : host;
+  const privateNote = model.private
+    ? `<div class="notice error space-ui-notice">This Space is marked private. The embedded UI may require a Hugging Face sign-in and browser permissions. Multi-HF does not inject its session token into this frame; use the API form for authenticated queued jobs.</div>`
+    : "";
+  view.innerHTML = `
+    <div class="section-head space-ui-header">
+      <div><h2>Live model interface</h2><p>The selected Space's own UI is loaded below. Each Space keeps its own controls, layout, examples, and workflow.</p></div>
+      <div class="inline-actions">
+        <button class="button button-sm" id="space-ui-back">← Workspace</button>
+        <a class="button button-sm" href="${escapeHtml(standaloneUrl)}" target="_blank" rel="noopener noreferrer">Open standalone ↗</a>
+        <button class="button button-primary button-sm" id="space-ui-job">Create queued job</button>
+      </div>
+    </div>
+    ${privateNote}
+    <div class="panel space-ui-panel">
+      <div class="panel-head">
+        <div><h2>${escapeHtml(model.title || model.ref || host)}</h2><div class="subtext">${escapeHtml(host)}</div></div>
+        <span class="badge running">LIVE SPACE UI</span>
+      </div>
+      <iframe class="space-ui-frame" src="${escapeHtml(host + "/")}" title="Live Hugging Face interface for ${escapeHtml(model.title || model.ref || host)}" loading="eager" referrerpolicy="no-referrer" allow="fullscreen; clipboard-write" allowfullscreen></iframe>
+    </div>
+    <p class="help space-ui-help">This is the model author's hosted interface, not a recreated generic form. Its inputs and results stay inside the Space and do not automatically populate Multi-HF profiles or the batch queue. Use “Create queued job” for batch runs. Some Spaces disable embedding; “Open standalone” is the fallback.</p>`;
+  document.querySelector("#space-ui-back")?.addEventListener("click", () => { currentSpaceUi = null; currentTab = "models"; render(); });
+  document.querySelector("#space-ui-job")?.addEventListener("click", () => { currentSpaceUi = null; currentTab = "models"; render(); openNewJob(model.id); });
+}
 function renderModels() {
   view.innerHTML = `<div class="section-head"><div><h2>Connected Spaces</h2><p>Discover Gradio endpoints from each Space's live configuration.</p></div><button class="button button-primary" id="models-add">＋ Add Space</button></div>
-  ${state.models.length ? `<div class="card-grid">${state.models.map((model) => `<article class="model-card"><div class="inline-actions"><span class="badge ${model.task === "video" ? "running" : ""}">${escapeHtml(model.task.toUpperCase())}</span><span class="badge">${model.endpoints.length} endpoints</span></div><div class="card-title" style="margin-top:12px">${escapeHtml(model.title)}</div><div class="card-meta">${escapeHtml(model.ref || model.host)}<br>Updated ${escapeHtml(timeAgo(model.fetchedAt))}</div><div class="card-actions"><button class="button button-primary button-sm" data-model-new="${escapeHtml(model.id)}">Create job</button><button class="button button-sm" data-model-refresh="${escapeHtml(model.id)}">Refresh schema</button><button class="button button-sm" data-model-token="${escapeHtml(model.id)}">Token: ${model.sendToken || model.private ? "sent" : "not sent"}</button><a class="button button-sm" href="${escapeHtml(model.ref ? `https://huggingface.co/spaces/${model.ref}` : model.host)}" target="_blank" rel="noopener">Open Space ↗</a><button class="button button-danger button-sm" data-model-remove="${escapeHtml(model.id)}">Remove</button></div></article>`).join("")}</div>` : `<div class="panel"><div class="empty"><div class="empty-mark">◇</div><strong>Add your first Space</strong><p>Enter a Hugging Face Space ID such as <span class="kbd">owner/name</span> or its public URL. Multi-HF reads the live Gradio schema and creates a dynamic generation form.</p><button class="button button-primary" id="models-empty-add">＋ Discover Space</button></div></div>`}`;
+  ${state.models.length ? `<div class="card-grid">${state.models.map((model) => `<article class="model-card"><div class="inline-actions"><span class="badge ${model.task === "video" ? "running" : ""}">${escapeHtml(model.task.toUpperCase())}</span><span class="badge">${model.endpoints.length} endpoints</span></div><div class="card-title" style="margin-top:12px">${escapeHtml(model.title)}</div><div class="card-meta">${escapeHtml(model.ref || model.host)}<br>Updated ${escapeHtml(timeAgo(model.fetchedAt))}</div><div class="card-actions"><button class="button button-primary button-sm" data-model-new="${escapeHtml(model.id)}">Create job</button><button class="button button-sm" data-model-ui="${escapeHtml(model.id)}">Open interface ↗</button><button class="button button-sm" data-model-refresh="${escapeHtml(model.id)}">Refresh schema</button><button class="button button-sm" data-model-token="${escapeHtml(model.id)}">Token: ${model.sendToken || model.private ? "sent" : "not sent"}</button><a class="button button-sm" href="${escapeHtml(model.ref ? `https://huggingface.co/spaces/${model.ref}` : model.host)}" target="_blank" rel="noopener">Open Space ↗</a><button class="button button-danger button-sm" data-model-remove="${escapeHtml(model.id)}">Remove</button></div></article>`).join("")}</div>` : `<div class="panel"><div class="empty"><div class="empty-mark">◇</div><strong>Add your first Space</strong><p>Enter a Hugging Face Space ID such as <span class="kbd">owner/name</span> or its public URL. Multi-HF reads the live Gradio schema and creates a dynamic generation form.</p><button class="button button-primary" id="models-empty-add">＋ Discover Space</button></div></div>`}`;
   document.querySelector("#models-add")?.addEventListener("click", () => openAddSpace());
   document.querySelector("#models-empty-add")?.addEventListener("click", () => openAddSpace());
   document.querySelectorAll("[data-model-new]").forEach((button) => button.addEventListener("click", () => openNewJob(button.dataset.modelNew)));
+  document.querySelectorAll("[data-model-ui]").forEach((button) => button.addEventListener("click", () => { currentSpaceUi = button.dataset.modelUi; render(); }));
   document.querySelectorAll("[data-model-token]").forEach((button) => button.addEventListener("click", () => {
     const model = getModel(button.dataset.modelToken); if (!model) return;
     if (model.private) { ping("This Space is private, so your token is always sent to it."); return; }
@@ -170,10 +209,11 @@ function renderModels() {
 }
 function renderProfiles() {
   view.innerHTML = `<div class="section-head"><div><h2>Reusable profiles</h2><p>Profiles save a Space, endpoint, and parameter values for quick batch creation.</p></div><button class="button button-primary" id="profiles-new">＋ New profile</button></div>
-  ${state.profiles.length ? `<div class="card-grid">${state.profiles.map((profile) => `<article class="profile-card"><div class="card-title">${escapeHtml(profile.name)}</div><div class="card-meta">${escapeHtml(getModel(profile.modelId)?.title || profile.modelId)}<br>${escapeHtml(profile.apiName)} · updated ${escapeHtml(timeAgo(profile.updatedAt))}</div><div class="card-actions"><button class="button button-primary button-sm" data-profile-use="${escapeHtml(profile.id)}">Use profile</button><button class="button button-sm" data-profile-edit="${escapeHtml(profile.id)}">Edit</button><button class="button button-danger button-sm" data-profile-remove="${escapeHtml(profile.id)}">Delete</button></div></article>`).join("")}</div>` : `<div class="panel"><div class="empty"><div class="empty-mark">▤</div><strong>No profiles saved</strong><p>Open a Space, set the prompt and generation parameters, then save those settings as a reusable profile.</p><button class="button button-primary" id="profiles-empty-new">＋ Create profile</button></div></div>`}`;
+  ${state.profiles.length ? `<div class="card-grid">${state.profiles.map((profile) => `<article class="profile-card"><div class="card-title">${escapeHtml(profile.name)}</div><div class="card-meta">${escapeHtml(getModel(profile.modelId)?.title || profile.modelId)}<br>${escapeHtml(profile.apiName)} · updated ${escapeHtml(timeAgo(profile.updatedAt))}</div><div class="card-actions"><button class="button button-primary button-sm" data-profile-use="${escapeHtml(profile.id)}">Use profile</button><button class="button button-sm" data-profile-ui="${escapeHtml(profile.id)}">Open model UI ↗</button><button class="button button-sm" data-profile-edit="${escapeHtml(profile.id)}">Edit</button><button class="button button-danger button-sm" data-profile-remove="${escapeHtml(profile.id)}">Delete</button></div></article>`).join("")}</div>` : `<div class="panel"><div class="empty"><div class="empty-mark">▤</div><strong>No profiles saved</strong><p>Open a Space, set the prompt and generation parameters, then save those settings as a reusable profile.</p><button class="button button-primary" id="profiles-empty-new">＋ Create profile</button></div></div>`}`;
   document.querySelector("#profiles-new")?.addEventListener("click", () => openNewProfile());
   document.querySelector("#profiles-empty-new")?.addEventListener("click", () => openNewProfile());
   document.querySelectorAll("[data-profile-use]").forEach((button) => button.addEventListener("click", () => { const profile = getProfile(button.dataset.profileUse); if (profile) openNewJob(profile.modelId, profile); }));
+  document.querySelectorAll("[data-profile-ui]").forEach((button) => button.addEventListener("click", () => { const profile = getProfile(button.dataset.profileUi); if (profile && getModel(profile.modelId)) { currentSpaceUi = profile.modelId; render(); } }));
   document.querySelectorAll("[data-profile-edit]").forEach((button) => button.addEventListener("click", () => { const profile = getProfile(button.dataset.profileEdit); if (profile) openNewProfile(profile); }));
   document.querySelectorAll("[data-profile-remove]").forEach((button) => button.addEventListener("click", () => { state.profiles = state.profiles.filter((p) => p.id !== button.dataset.profileRemove); saveState(); render(); ping("Profile deleted."); }));
 }
@@ -569,7 +609,7 @@ function importWorkspace(data) {
   state = imported;
   accountTokens.clear(); jobFiles.clear(); saveState(); render(); ping("Workspace imported. Reconnect accounts to use private Spaces.");
 }
-document.querySelectorAll("[data-tab]").forEach((button) => button.addEventListener("click", () => { currentTab = button.dataset.tab; render(); }));
+document.querySelectorAll("[data-tab]").forEach((button) => button.addEventListener("click", () => { currentSpaceUi = null; currentTab = button.dataset.tab; render(); }));
 document.querySelector("#quick-add").addEventListener("click", () => openNewJob());
 document.querySelector("#export-data").addEventListener("click", exportWorkspace);
 document.querySelector("#import-data").addEventListener("click", () => document.querySelector("#import-file").click());
