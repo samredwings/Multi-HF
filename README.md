@@ -5,8 +5,9 @@ A dependency-free, local-first web workbench for Hugging Face Spaces using Gradi
 ## Features
 
 - Add a Space by `owner/name` or URL and discover its Gradio endpoints from `/config`.
+- Open each Space's original hosted interface inside Multi-HF. Different Spaces keep their own native controls and layout; use the standalone link when a Space disables embedding.
 - Render text, number, slider, checkbox, choice, and file inputs from the live schema.
-- Store profiles and jobs in browser storage; export/import the workspace as JSON.
+- Store profiles and jobs in browser storage; export/import the workspace as JSON. Profiles store API parameter values; the embedded native UI runs independently and does not share form state with the queue.
 - Connect Hugging Face tokens for the current browser session. Tokens are held in memory only and are not included in exports or persisted storage. A token is only sent to `huggingface.co`, and to a `*.hf.space` host only when the Hub reports that Space as private; public Spaces never receive it.
 - Run queued generation jobs, show returned image/video/audio/file outputs, and download results.
 - Classify auth, waking, transient, quota, policy, and fatal failures. Quota failures pause that job and do not invent a reset time or automatically rotate accounts to work around limits.
