@@ -103,3 +103,12 @@ test("workspace import preserves per-job and profile GPU reservation estimates",
   });
   assert.equal(defaults.jobs[0].reservationSeconds, 60);
 });
+
+
+test("workspace import retains nested hardware flavor metadata", () => {
+  const imported = sanitizeWorkspace({
+    models: [{ ...model, hardware: { current: { name: "zero-a10g" } } }],
+    profiles: [], jobs: [], accounts: []
+  });
+  assert.equal(imported.models[0].hardware, "zero-a10g");
+});
