@@ -127,6 +127,15 @@ function isFileField(field) {
 function fileMeta(file) {
   return { name: file.name || "upload", size: Number(file.size || 0), mime: file.type || "application/octet-stream" };
 }
+function hardwareIdentifier(value) {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+  return String(value.name || value.id || value.current || value.hardware || value.type || "");
+}
+function isZeroGpuSpace(model) {
+  const raw = hardwareIdentifier(model?.hardware);
+  return /zero(?:[-\\s]?gpu|[-\\s]?(?:a10g|t4|l4|a100))/i.test(raw) || /zerogpu/i.test(JSON.stringify(model?.hardware ?? ""));
+}
 function formatGpuTime(seconds) {
   const safe = Math.max(0, Math.floor(Number(seconds) || 0));
   return `${Math.floor(safe / 60)}m ${String(safe % 60).padStart(2, "0")}s`;
@@ -931,8 +940,9 @@ async function submitGradioJob(prepared, signal) {
   let initial = {};
   try { initial = await response.json(); }
   catch {
-    const error = new Error("Gradio returned an invalid submission response.");
+    const error = new Error("Gradio returned an invalid successful submission response; the request may already be queued.");
     error.status = response.status;
+    error.submissionUncertain = true;
     throw error;
   }
   if (initial?.error || initial?.success === false) {
@@ -943,7 +953,9 @@ async function submitGradioJob(prepared, signal) {
   if (initial?.event_id) return { ...prepared, eventId: String(initial.event_id) };
   if (Object.hasOwn(initial || {}, "data")) return { ...prepared, immediateData: initial.data };
   if (Object.hasOwn(initial?.output || {}, "data")) return { ...prepared, immediateData: initial.output.data };
-  throw new Error("Gradio accepted the request but returned neither an event ID nor result data.");
+  const uncertain = new Error("Gradio accepted the request but returned neither an event ID nor result data. Check the Space queue before submitting again.");
+  uncertain.submissionUncertain = true;
+  throw uncertain;
 }
 async function waitForGradioJob(submission, signal) {
   if (Object.hasOwn(submission, "immediateData")) return submission.immediateData;
@@ -1041,7 +1053,7 @@ async function runQueue() {
       }
 
       const freshJobs = batch.filter((job) => !job.remoteEventId);
-      if (freshJobs.length && /zero(?:[-\s]?gpu|[-\s]?(?:a10g|t4|l4|a100))/i.test(String(model.hardware || "")) && (model.private === true || model.sendToken === true) && batch[0].accountId && accountTokens.has(batch[0].accountId)) {
+      if (freshJobs.length && isZeroGpuSpace(model) && (model.private === true || model.sendToken === true) && batch[0].accountId && accountTokens.has(batch[0].accountId)) {
         const quota = await refreshZeroGpuQuota(batch[0].accountId, true);
         if (quota && quota.remaining <= 0) {
           for (const job of freshJobs) {
@@ -1198,7 +1210,7 @@ async function runQueue() {
       saveState();
       render();
 
-      if (/zero(?:[-\s]?gpu|[-\s]?(?:a10g|t4|l4|a100))/i.test(String(model.hardware || "")) && (model.private === true || model.sendToken === true) && batch[0].accountId) {
+      if (isZeroGpuSpace(model) && (model.private === true || model.sendToken === true) && batch[0].accountId) {
         await refreshZeroGpuQuota(batch[0].accountId, true);
       }
       if (!queueHalted) {
