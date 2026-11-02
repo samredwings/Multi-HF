@@ -1,8 +1,37 @@
 const LAYOUT = new Set([
   "state", "browserstate", "button", "markdown", "html", "label", "dataset", "form",
-  "column", "row", "group", "accordion", "tabs", "tabitem", "highlightedtext", "gallery",
+  "column", "row", "group", "accordion", "tabs", "tabitem", "highlightedtext",
 ]);
 const KNOWN_HF_HOSTS = new Set(["huggingface.co", "www.huggingface.co", "hf.co"]);
+
+export function normalizeSpaceFramework(value) {
+  const framework = String(value ?? "").trim().toLowerCase();
+  return ["gradio", "streamlit", "docker", "static", "custom"].includes(framework) ? framework : "unknown";
+}
+
+/** Extract a stable hardware flavor from Hub metadata, including nested runtime objects. */
+export function normalizeHardwareIdentifier(value) {
+  if (typeof value === "string") return value.trim().slice(0, 80);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+  for (const key of ["current", "name", "id", "hardware", "flavor", "type", "slug", "label", "requested"]) {
+    const candidate = value[key];
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim().slice(0, 80);
+    if (candidate && typeof candidate === "object") {
+      const nested = normalizeHardwareIdentifier(candidate);
+      if (nested) return nested;
+    }
+  }
+  return "";
+}
+
+export function normalizeGradioVersion(...candidates) {
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") continue;
+    const value = candidate.trim().replace(/^v/i, "");
+    if (/^\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?$/.test(value)) return value;
+  }
+  return "";
+}
 
 export function stripEmoji(value) {
   return String(value ?? "").replace(/\p{Extended_Pictographic}/gu, "").replace(/[\u200d\ufe0f]/g, "").replace(/\s+/g, " ").trim();
@@ -60,23 +89,35 @@ function typeFor(rawType, props) {
   const type = String(rawType || "textbox").toLowerCase();
   if (LAYOUT.has(type)) return "skip";
   if (type === "textbox") return Number(props.lines ?? 1) > 1 || /prompt|caption|description|negative/i.test(String(props.label ?? "")) ? "textarea" : "text";
+  if (type === "gallery") return "gallery";
+  if (type === "json") return "json";
+  if (type === "colorpicker") return "color";
+  if (type === "date") return "date";
+  if (type === "time") return "time";
+  if (type === "datetime") return "datetime-local";
   if (type === "slider") return "slider";
   if (type === "number") return "number";
   if (type === "checkbox") return "checkbox";
   if (type === "checkboxgroup") return "checkboxgroup";
   if (type === "dropdown") return "select";
   if (type === "radio") return "radio";
-  if (["image", "sketchpad", "imageeditor"].includes(type)) return "image";
+  if (type === "image") return "image";
+  if (["sketchpad", "imagemask", "imageeditor", "chatbot", "dataframe", "plot", "annotatedimage", "model3d", "pointcloud", "timeseries"].includes(type)) return "json";
   if (type === "video") return "video";
   if (type === "audio") return "audio";
   if (["file", "uploadbutton"].includes(type)) return "file";
-  return "text";
+  // Unknown input components are structured by default. Sending arbitrary text
+  // for a complex Gradio value silently breaks inference payloads; JSON keeps
+  // the native API shape available to an advanced user instead.
+  return "json";
 }
 function defaultFor(type, value, choices) {
   if (type === "checkbox") return value === true;
   if (type === "checkboxgroup") return Array.isArray(value) ? value.map(String) : [];
   if (["number", "slider"].includes(type)) return typeof value === "number" ? value : (value ?? null);
   if (["select", "radio"].includes(type)) return value == null ? (choices[0]?.value ?? "") : String(value);
+  if (type === "json") { try { return JSON.stringify(value ?? {}, null, 2); } catch { return "{}"; } }
+  if (type === "gallery") return Array.isArray(value) ? value : [];
   return typeof value === "string" ? value : "";
 }
 function toField(component) {
@@ -93,9 +134,12 @@ function toField(component) {
     placeholder: typeof props.placeholder === "string" ? stripEmoji(props.placeholder) : "",
     min: number(props.minimum ?? props.min), max: number(props.maximum ?? props.max), step: number(props.step),
     choices, allowCustom: props.allow_custom_value === true, defaultValue: defaultFor(type, props.value, choices),
+    multiple: type === "gallery" || props.file_count === "multiple" || props.file_count === "directory" || props.multiple === true,
+    fileTypes: Array.isArray(props.file_types) ? props.file_types.filter((item) => typeof item === "string").slice(0, 20) : [],
     passthrough: hidden && props.value && typeof props.value === "object" ? props.value : undefined,
   };
-  if (["image", "video", "audio", "file"].includes(type)) field.defaultValue = null;
+  if (["image", "video", "audio", "file", "gallery"].includes(type)) field.defaultValue = null;
+  if (type === "json" && typeof props.value === "string") field.defaultValue = props.value;
   return field;
 }
 function score(endpoint) {
@@ -142,7 +186,12 @@ export function parseSpaceConfig(config) {
   const media = endpoints.filter((ep) => ep.outputs.some((out) => ["image", "video", "audio", "gallery", "file"].includes(out.type)));
   const ordered = (media.length ? media : endpoints).slice().sort((a, b) => score(b) - score(a));
   if (!ordered.length) throw new Error("No runnable API endpoints were found in this Space configuration.");
-  return { title: stripEmoji(root.title) || "Hugging Face Space", apiPrefix: typeof root.api_prefix === "string" && root.api_prefix.startsWith("/") ? root.api_prefix : "/gradio_api", endpoints: ordered.slice(0, 12) };
+  return {
+    title: stripEmoji(root.title) || "Hugging Face Space",
+    apiPrefix: typeof root.api_prefix === "string" && root.api_prefix.startsWith("/") ? root.api_prefix : "/gradio_api",
+    gradioVersion: normalizeGradioVersion(root.version, root.gradio_version, root.gradioVersion),
+    endpoints: ordered.slice(0, 12),
+  };
 }
 export function taskFromEndpoints(endpoints) {
   const types = endpoints.flatMap((endpoint) => endpoint.outputs.map((out) => out.type));
@@ -155,7 +204,7 @@ const POLICY = /content policy|safety filter|moderation|nsfw filter|flagged as|b
 const AUTH = /invalid token|unauthorized|\b401\b|expired token|not authenticated|authentication required/i;
 const QUOTA = /zero\s*gpu|gpu quota|quota exceeded|out of credits|insufficient credit|payment required|monthly (included )?credit|depleted|spend limit|exceeded your (free|gpu|quota)|no gpu quota/i;
 const WAKING = /asleep|waking|is starting|space is (sleep|start|build|paused)|currently loading|loading (the )?model|model is loading|building replica/i;
-const TRANSIENT = /timeout|timed out|econnreset|socket hang up|network|fetch failed|bad gateway|gateway timeout|connection (closed|reset|dropped|aborted)|runtime (has )?(ended|expired)|upstream|overloaded|rate limit|too many requests|\b429\b|\b502\b|\b503\b|\b504\b|\b524\b|disconnected/i;
+const TRANSIENT = /timeout|timed out|econnreset|socket hang up|network|fetch failed|failed to fetch|load failed|operation was aborted|request aborted|bad gateway|gateway timeout|connection (closed|reset|dropped|aborted)|runtime (has )?(ended|expired)|upstream|overloaded|rate limit|too many requests|\b429\b|\b502\b|\b503\b|\b504\b|\b524\b|disconnected/i;
 export function classifyFailure(status, message = "") {
   const text = `${status ?? ""} ${message}`;
   if (POLICY.test(text)) return "policy";
@@ -208,18 +257,91 @@ export function normalizeOutputs(value, label = "Output", baseUrl = "") {
 }
 export function safeId(prefix = "id") { return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`; }
 
+/** Keep each Space/account batch together to reduce avoidable model/Space switching.
+ * The first pending job chooses the batch; jobs keep their creation order within it.
+ */
+export function nextQueueBatch(jobs, batchMode = true) {
+  const ready = (Array.isArray(jobs) ? jobs : [])
+    .filter((job) => job && ["ready", "retry"].includes(job.status))
+    .slice()
+    .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
+  const first = ready[0];
+  if (!first) return [];
+  if (!batchMode) return [first];
+  // Group queued work for the same Space/account to avoid repeated cold starts.
+  return ready.filter((job) => job.modelId === first.modelId && (job.accountId || "") === (first.accountId || ""));
+}
+
+/** When quota cannot be inspected, submit at most one new ZeroGPU request.
+ * Already-submitted events can be resumed because they do not create a new reservation.
+ */
+export function limitQueueBatchWithoutQuota(jobs) {
+  const list = Array.isArray(jobs) ? jobs : [];
+  const firstFresh = list.find((job) => job && !job.remoteEventId);
+  if (!firstFresh) return list.slice();
+  return list.filter((job) => job?.remoteEventId || job?.id === firstFresh.id);
+}
+
+/** Admit only jobs whose estimated ZeroGPU reservations fit the live account quota. */
+export function admitQueueJobsByQuota(jobs, quota) {
+  const admitted = [];
+  const held = [];
+  let remainingSeconds = Math.max(0, Number(quota?.remaining) || 0);
+  let remainingRuns = quota?.runs ? Math.max(0, Number(quota.runs.remaining) || 0) : Number.POSITIVE_INFINITY;
+  let reservedSeconds = 0;
+  for (const job of Array.isArray(jobs) ? jobs : []) {
+    const requestedSeconds = Math.max(1, Math.min(600, Number(job?.reservationSeconds) || 60));
+    if (requestedSeconds <= remainingSeconds && remainingRuns > 0) {
+      admitted.push(job);
+      remainingSeconds -= requestedSeconds;
+      remainingRuns -= 1;
+      reservedSeconds += requestedSeconds;
+    } else {
+      held.push({ job, requestedSeconds });
+    }
+  }
+  return { admitted, held, reservedSeconds, remainingSeconds, remainingRuns };
+}
+
+/** Normalize /api/spaces/zero-gpu/quota (GPU-seconds). HTTP uses current/resetsAt. */
+export function normalizeZeroGpuQuota(raw) {
+  const value = record(raw);
+  const base = Number(value?.base);
+  const remaining = Number(value?.current ?? value?.remaining);
+  if (!Number.isFinite(base) || !Number.isFinite(remaining)) throw new Error("Hugging Face returned an invalid ZeroGPU quota response.");
+  const reset = value.resetsAt ?? value.resets_at;
+  const overquota = value.overquotaUsed ?? value.overquota_used;
+  const rawRuns = record(value.runs);
+  const runs = rawRuns && Number.isFinite(Number(rawRuns.remaining))
+    ? {
+        used: Number.isFinite(Number(rawRuns.used)) ? Math.max(0, Number(rawRuns.used)) : 0,
+        limit: Number.isFinite(Number(rawRuns.limit)) ? Math.max(0, Number(rawRuns.limit)) : 0,
+        remaining: Math.max(0, Number(rawRuns.remaining)),
+        resetsAt: typeof (rawRuns.resetsAt ?? rawRuns.resets_at) === "string" ? (rawRuns.resetsAt ?? rawRuns.resets_at) : null,
+      }
+    : null;
+  return {
+    base: Math.max(0, base),
+    remaining: Math.max(0, remaining),
+    resetsAt: typeof reset === "string" && reset ? reset : null,
+    overquotaUsed: Number.isFinite(Number(overquota)) ? Math.max(0, Number(overquota)) : 0,
+    runs,
+  };
+}
+
+
 // ---------------------------------------------------------------------------
 // Token policy: a token may go to the Hub API, and to a *.hf.space host only
 // when the Hub reported that Space as private. Anyone can publish a public
 // Space, so public hosts must never receive a user's token.
-export function tokenHeaders(token, url, { privateSpace = false } = {}) {
+export function tokenHeaders(token, url, { privateSpace = false, allowPublicSpace = false } = {}) {
   if (!token) return {};
   let target;
   try { target = new URL(url); } catch { return {}; }
   if (target.protocol !== "https:" || target.username || target.password || target.port) return {};
   const host = target.hostname.toLowerCase();
   if (host === "huggingface.co" || host === "www.huggingface.co") return { Authorization: `Bearer ${token}` };
-  if (privateSpace && /^[a-z0-9-]+\.hf\.space$/.test(host)) return { Authorization: `Bearer ${token}` };
+  if ((privateSpace || allowPublicSpace) && /^[a-z0-9-]+\.hf\.space$/.test(host)) return { Authorization: `Bearer ${token}` };
   return {};
 }
 
@@ -228,7 +350,7 @@ export function tokenHeaders(token, url, { privateSpace = false } = {}) {
 const MAX_INLINE_STORED = 50_000;
 const JOB_STATUSES = new Set(["ready", "retry", "running", "done", "failed", "paused"]);
 const RESULT_KINDS = new Set(["image", "video", "audio", "file", "text"]);
-const FIELD_TYPES = new Set(["text", "textarea", "number", "slider", "checkbox", "checkboxgroup", "select", "radio", "image", "video", "audio", "file"]);
+const FIELD_TYPES = new Set(["text", "textarea", "json", "color", "date", "time", "datetime-local", "number", "slider", "checkbox", "checkboxgroup", "select", "radio", "image", "video", "audio", "file", "gallery"]);
 const text = (value, max = 500) => (typeof value === "string" ? value.slice(0, max) : "");
 const finite = (value) => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
 
@@ -243,7 +365,14 @@ export function persistableResult(result) {
 /** A job left in "running" by a closed tab must not be stuck forever, and must not silently re-spend quota. */
 export function recoverRunningJobs(jobs, now = Date.now()) {
   return (Array.isArray(jobs) ? jobs : []).map((job) => (job?.status === "running"
-    ? { ...job, status: "paused", error: "Interrupted by a page reload. Retry when ready.", updatedAt: now }
+    ? {
+        ...job,
+        status: "paused",
+        error: job.remoteEventId
+          ? "The browser session was interrupted after this job was submitted to the Space. Resume its result stream to avoid submitting a duplicate GPU task."
+          : "Interrupted by a page reload before a remote event was saved. Retry when ready.",
+        updatedAt: now,
+      }
     : job));
 }
 
@@ -252,7 +381,7 @@ function cleanEndpoint(raw) {
   if (!ep || typeof ep.apiName !== "string" || !/^[\w.-]+$/.test(ep.apiName)) return null;
   const fields = (Array.isArray(ep.fields) ? ep.fields : []).map(record).filter((f) => f && typeof f.key === "string" && /^c\d+$/.test(f.key) && FIELD_TYPES.has(f.type));
   const outputs = (Array.isArray(ep.outputs) ? ep.outputs : []).map(record).filter((o) => o && typeof o.key === "string").map((o) => ({ key: o.key, label: text(o.label, 120) || "Output", type: text(o.type, 40) || "text" }));
-  return { apiName: ep.apiName, fields: fields.map((f) => ({ ...f, choices: Array.isArray(f.choices) ? f.choices : [] })), outputs };
+  return { apiName: ep.apiName, fields: fields.map((f) => ({ ...f, choices: Array.isArray(f.choices) ? f.choices : [], multiple: f.multiple === true, fileTypes: Array.isArray(f.fileTypes) ? f.fileTypes.filter((item) => typeof item === "string").slice(0, 20) : [] })), outputs };
 }
 function cleanResult(raw) {
   const item = record(raw);
@@ -274,27 +403,32 @@ export function sanitizeWorkspace(data) {
     const host = normalizeHost(m.host);
     if (!host) continue;
     const endpoints = (Array.isArray(m.endpoints) ? m.endpoints : []).map(cleanEndpoint).filter(Boolean);
-    if (!endpoints.length) continue;
+    const framework = normalizeSpaceFramework(m.framework);
+    if (!endpoints.length && framework === "unknown") continue;
     models.push({
       id: text(m.id, 200), kind: "space", host, endpoints,
+      gradioVersion: normalizeGradioVersion(m.gradioVersion),
+      framework,
       ref: /^[\w.-]+\/[\w.-]+$/.test(m.ref ?? "") ? m.ref : "",
       title: text(m.title, 200) || host, note: text(m.note, 200),
       task: ["image", "video", "other"].includes(m.task) ? m.task : "other",
       apiPrefix: /^\/[\w./-]*$/.test(m.apiPrefix ?? "") ? m.apiPrefix : "/gradio_api",
-      activeApi: endpoints.some((e) => e.apiName === m.activeApi) ? m.activeApi : endpoints[0].apiName,
-      accountId: text(m.accountId, 100), hardware: text(m.hardware, 80) || "Unknown",
-      fetchedAt: finite(m.fetchedAt) ?? 0, private: m.private === true,
+      activeApi: endpoints.some((e) => e.apiName === m.activeApi) ? m.activeApi : (endpoints[0]?.apiName || ""),
+      accountId: text(m.accountId, 100), hardware: normalizeHardwareIdentifier(m.hardware) || "Unknown",
+      fetchedAt: finite(m.fetchedAt) ?? 0, private: false, sendToken: false, zeroGpu: m.zeroGpu === true,
     });
   }
   const known = new Set(models.map((m) => m.id));
   const profiles = root.profiles.map(record).filter((p) => p && typeof p.id === "string" && known.has(p.modelId)).map((p) => ({
     id: text(p.id, 100), name: text(p.name, 120), modelId: p.modelId, apiName: text(p.apiName, 100),
-    values: record(p.values) ?? {}, accountId: text(p.accountId, 100), createdAt: finite(p.createdAt) ?? 0, updatedAt: finite(p.updatedAt) ?? 0,
+    values: record(p.values) ?? {}, accountId: text(p.accountId, 100), reservationSeconds: Math.max(1, Math.min(600, finite(p.reservationSeconds) ?? 60)), createdAt: finite(p.createdAt) ?? 0, updatedAt: finite(p.updatedAt) ?? 0,
   }));
   const jobs = root.jobs.map(record).filter((j) => j && typeof j.id === "string" && known.has(j.modelId)).map((j) => ({
     id: text(j.id, 100), name: text(j.name, 200), modelId: j.modelId, apiName: text(j.apiName, 100), accountId: text(j.accountId, 100),
     values: record(j.values) ?? {}, files: Array.isArray(j.files) ? j.files.filter((f) => typeof f === "string") : [],
+    reservationSeconds: Math.max(1, Math.min(600, finite(j.reservationSeconds) ?? 60)),
     status: JOB_STATUSES.has(j.status) ? j.status : "failed", error: text(j.error, 2000),
+    remoteEventId: text(j.remoteEventId, 300), phase: text(j.phase, 160), batchId: text(j.batchId, 100),
     result: (Array.isArray(j.result) ? j.result : []).map(cleanResult).filter(Boolean),
     createdAt: finite(j.createdAt) ?? 0, updatedAt: finite(j.updatedAt) ?? 0, startedAt: finite(j.startedAt), finishedAt: finite(j.finishedAt),
     progress: finite(j.progress), attempts: 0,
