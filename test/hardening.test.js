@@ -14,20 +14,23 @@ test("token goes to the Hub, and to hf.space only for private Spaces", () => {
   assert.deepEqual(tokenHeaders(null, "https://huggingface.co/"), {});
 });
 
-const model = { id: "a/b", host: "https://a-b.hf.space", endpoints: [{ apiName: "generate", fields: [{ key: "c1", type: "text" }], outputs: [{ key: "o2", label: "x", type: "image" }] }], task: "image" };
+const model = { id: "a/b", host: "https://a-b.hf.space", sendToken: true, endpoints: [{ apiName: "generate", fields: [{ key: "c1", type: "text" }], outputs: [{ key: "o2", label: "x", type: "image" }] }], task: "image" };
 
 test("import drops models with non-hf.space hosts and their jobs", () => {
   const ws = sanitizeWorkspace({ workspace: {
     models: [model, { ...model, id: "evil", host: "https://attacker.example" }],
     profiles: [], accounts: [{ id: "acc", label: "me", token: "hf_secret" }],
     jobs: [
-      { id: "j1", modelId: "a/b", apiName: "generate", accountId: "acc", status: "running", result: [{ kind: "image", url: "javascript:alert(1)" }, { kind: "image", url: "https://x.example/o.png" }] },
+      { id: "j1", modelId: "a/b", apiName: "generate", accountId: "acc", status: "running", remoteEventId: "event-1", phase: "Submitted", result: [{ kind: "image", url: "javascript:alert(1)" }, { kind: "image", url: "https://x.example/o.png" }] },
       { id: "j2", modelId: "evil", apiName: "generate", status: "ready" },
     ],
   } });
   assert.equal(ws.models.length, 1);
   assert.equal(ws.jobs.length, 1);
   assert.equal(ws.jobs[0].status, "paused");
+  assert.equal(ws.jobs[0].remoteEventId, "event-1");
+  assert.equal(ws.jobs[0].phase, "Submitted");
+  assert.equal(ws.models[0].sendToken, true);
   assert.equal(ws.jobs[0].result.length, 1);
   assert.equal("token" in ws.accounts[0], false);
   assert.throws(() => sanitizeWorkspace({ models: 1 }), /not a Multi-HF/);
