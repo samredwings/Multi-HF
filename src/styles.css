@@ -25,3 +25,12 @@
 .quota-meter{height:8px;border-radius:20px;overflow:hidden;background:#263241}
 .quota-meter span{display:block;height:100%;border-radius:20px;background:var(--green);transition:width .2s}
 @media(max-width:720px){.quota-metrics{grid-template-columns:1fr 1fr}.quota-metrics>div:first-child{grid-column:1/-1}.quota-panel .panel-head{align-items:flex-start;flex-wrap:wrap}.quota-panel .panel-head .inline-actions{width:100%}.quota-panel select{max-width:none;flex:1}}
+
+/* Queue visibility: quota warnings and inspectable per-job payloads. */
+.quota-warning{margin-top:10px;padding:10px 12px;border:1px solid #74522b;border-radius:8px;background:#302518;color:#f2d29c;font-size:11px;line-height:1.5}
+.job-inputs{padding:0 16px}
+.job-input-row{display:grid;grid-template-columns:minmax(130px,.32fr) minmax(0,1fr);gap:14px;padding:12px 0;border-bottom:1px solid var(--line)}
+.job-input-row:last-child{border-bottom:0}
+.job-input-row strong{font-size:12px;color:#b9c7d8}
+.job-input-row pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;color:#e1e8f1}
+@media(max-width:720px){.job-input-row{grid-template-columns:1fr;gap:6px}}
