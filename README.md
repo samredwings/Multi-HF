@@ -5,8 +5,8 @@ A dependency-free, local-first web workbench for Hugging Face Spaces using Gradi
 ## Features
 
 - Add a Space by `owner/name` or URL and discover its Gradio endpoints from `/config`.
-- Detect the Gradio runtime version from the Space config / Hub metadata and load the matching official `gradio-app` web component so each Space keeps its own native controls, layout, and interactions. If the runtime version is unavailable or the component cannot load, fall back to the hosted Space iframe or standalone page.
-- Render text, JSON, color, date/time, number, slider, checkbox, choice, and file inputs from the live schema for API-backed queue jobs.
+- Detect the Space SDK from Hub metadata and its Gradio runtime version from config / Hub metadata. Gradio Spaces load the matching official `gradio-app` web component so the author's own controls, layout, and interactions are preserved; Streamlit, Docker, and static/custom Spaces open their hosted UI in an iframe. If version detection or component loading fails, fall back to the hosted iframe or standalone page.
+- Render text, JSON, color, date/time, number, slider, checkbox, choice, and file inputs from the live Gradio schema for API-backed queue jobs. Non-Gradio Spaces remain available as hosted UI-only models when they do not expose a Gradio API.
 - Store profiles and jobs in browser storage; export/import the workspace as JSON. Profiles store API parameter values; the native Space UI remains hosted by its author and does not automatically share form state with the queue.
 - Connect Hugging Face tokens for the current browser session. Tokens are held in memory only and are not included in exports or persisted storage. A token is only sent to `huggingface.co`, and to a `*.hf.space` host only when the Hub reports that Space as private; public Spaces never receive it.
 - Run queued generation jobs, show returned image/video/audio/file outputs, and download results.
@@ -32,6 +32,6 @@ npm run preview
 
 - Workspace records are stored in this browser's `localStorage`; clear browser data to remove them. Never use a shared browser for private prompts or personal data.
 - Access tokens are session-only. On refresh, reconnect the account. The app does not send tokens to a backend.
-- Gradio Space CORS settings, private-space permissions, browser WebView support, and endpoint changes may prevent a Space from being reached from the browser. The native `gradio-app` component requires a detected Gradio version; the iframe and standalone links are fallbacks, not a guarantee that every Space permits embedding.
+- Gradio Space CORS settings, private-space permissions, browser WebView support, and endpoint changes may prevent a Space from being reached from the browser. The native `gradio-app` component requires a detected Gradio version. Only one Gradio web-component version can be active in a browser session; if a different version is already loaded, Multi-HF uses the iframe fallback. The iframe and standalone links are fallbacks, not a guarantee that every Space permits embedding.
 - Queue execution depends on the target Space's currently exposed API and its own resource/quota policies. A quota failure leaves the job paused for a manual retry or resource/account selection; the app never guesses quota reset timing.
 - The Android APK is a WebView wrapper around the shared web UI, not a fully native Compose UI. Generation requests remain foreground browser requests; they are not scheduled as a native background WorkManager task. Android APK assembly requires an Android SDK and Gradle. Browser tokens remain session-only and workspace content uses localStorage.
