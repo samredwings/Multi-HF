@@ -1068,10 +1068,10 @@ async function runQueue() {
           job.updatedAt = Date.now();
           continue;
         }
-        if (job.accountId && (!accountTokens.has(job.accountId) || !getAccount(job.accountId)?.enabled)) {
+        if ((model.private === true || model.sendToken === true) && (!job.accountId || !accountTokens.has(job.accountId) || !getAccount(job.accountId)?.enabled)) {
           job.status = "paused";
           job.phase = "";
-          job.error = "The selected account is not connected in this browser session. Connect it and retry this job.";
+          job.error = "This Space requires the selected account token (private Space or explicit Token: sent consent). Connect an enabled account, select it in the job, and retry.";
           job.updatedAt = Date.now();
           queueHalted = true;
           continue;
