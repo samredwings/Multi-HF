@@ -134,7 +134,7 @@ function hardwareIdentifier(value) {
 }
 function isZeroGpuSpace(model) {
   const raw = hardwareIdentifier(model?.hardware);
-  return /zero(?:[-\s]?gpu|[-\s]?(?:a10g|t4|l4|a100))/i.test(raw) || /zerogpu/i.test(JSON.stringify(model?.hardware ?? ""));
+  return /^(?:zero|zero[-\s]?gpu)$/i.test(raw.trim()) || /zero(?:[-\s]?gpu|[-\s]?(?:a10g|t4|l4|a100))/i.test(raw) || /zero(?:[-\s]?gpu)/i.test(JSON.stringify(model?.hardware ?? ""));
 }
 function updateVisibleJobPhase(job) {
   if (!job?.id) return;
@@ -246,8 +246,10 @@ function renderQuotaPanel() {
     const quota = quotaState.data;
     const pct = quota.base > 0 ? Math.max(0, Math.min(100, quota.remaining / quota.base * 100)) : 0;
     const runSummary = quota.runs ? `<p class="help">Runs remaining: ${quota.runs.remaining}${quota.runs.limit ? " / " + quota.runs.limit : ""}${quota.runs.resetsAt ? " · resets " + escapeHtml(fmtDate(quota.runs.resetsAt)) : ""}</p>` : "";
+    const estimatedCalls = Math.floor(quota.remaining / 60);
+    const reservationHint = '<p class="help">At the common 60-second default reservation, that is about ' + estimatedCalls + ' more request(s). A Space can reserve a different duration, so treat this as an estimate—not a guarantee.</p>';
     const lowWarning = quota.remaining > 0 && quota.remaining < 60 ? '<div class="quota-warning">Less than 60 GPU-seconds remain. Many ZeroGPU Spaces reserve 60 seconds per call by default; some Spaces define a shorter or longer duration.</div>' : "";
-    quotaBody = `<div class="quota-metrics"><div><span class="muted">Remaining</span><strong>${formatGpuTime(quota.remaining)}</strong></div><div><span class="muted">Daily allowance</span><strong>${formatGpuTime(quota.base)}</strong></div><div><span class="muted">Paid overage used</span><strong>${formatGpuTime(quota.overquotaUsed)}</strong></div></div><div class="quota-meter"><span style="width:${pct}%"></span></div><p class="help">${quota.resetsAt ? "Quota resets " + escapeHtml(fmtDate(quota.resetsAt)) : "Reset time not reported yet"} · refreshed ${escapeHtml(timeAgo(quotaState.checkedAt))}</p>${runSummary}${lowWarning}`;
+    quotaBody = `<div class="quota-metrics"><div><span class="muted">Remaining</span><strong>${formatGpuTime(quota.remaining)}</strong></div><div><span class="muted">Daily allowance</span><strong>${formatGpuTime(quota.base)}</strong></div><div><span class="muted">Paid overage used</span><strong>${formatGpuTime(quota.overquotaUsed)}</strong></div></div><div class="quota-meter"><span style="width:${pct}%"></span></div><p class="help">${quota.resetsAt ? "Quota resets " + escapeHtml(fmtDate(quota.resetsAt)) : "Reset time not reported yet"} · refreshed ${escapeHtml(timeAgo(quotaState.checkedAt))}</p>${runSummary}${reservationHint}${lowWarning}`;
   } else if (quotaState.error && quotaState.accountId === preferred) quotaBody = `<p class="help">${escapeHtml(quotaState.error)}</p>`;
   else quotaBody = '<p class="help">Check your account’s remaining ZeroGPU GPU-seconds. Requires a fine-grained token with “Billing → Read billing usage and payment method status” permission.</p>';
   return `<div class="panel quota-panel"><div class="panel-head"><div><h2>ZeroGPU allowance</h2><div class="subtext">Live GPU-seconds for the selected Hugging Face account · GPU time, not wall-clock time</div><p class="help">The 5-minute Free-account allowance is used when the Space receives your token. Public Spaces do not receive it unless you explicitly turn on “Token: sent” for that Space; otherwise anonymous requests have a lower limit.</p></div><div class="inline-actions">${accounts.length ? `<select id="quota-account" aria-label="Quota account">${options}</select>` : ""}<button class="button button-sm" id="quota-refresh" ${!accounts.length || quotaState.loading ? "disabled" : ""}>${quotaState.loading ? "Checking…" : "Refresh quota"}</button></div></div><div class="panel-body">${quotaBody}</div></div>`;
@@ -272,7 +274,7 @@ function renderQueue() {
   document.querySelector("#queue-cancel")?.addEventListener("click", () => { queueHalted = true; currentAbort?.abort(); ping("Cancelling the active batch. Requests already accepted by the Space may still finish remotely."); render(); });
   ["queue-add", "queue-empty-add"].forEach((id) => document.querySelector(`#${id}`)?.addEventListener("click", () => openNewJob()));
   document.querySelector("#quota-account")?.addEventListener("change", (event) => { quotaAccountId = event.target.value; quotaState = { data: null, error: "", loading: false, accountId: "", checkedAt: 0 }; render(); });
-  document.querySelector("#quota-refresh")?.addEventListener("click", () => refreshZeroGpuQuota(document.querySelector("#quota-account")?.value || quotaAccountId || accounts[0]?.id || ""));
+  document.querySelector("#quota-refresh")?.addEventListener("click", () => refreshZeroGpuQuota(document.querySelector("#quota-account")?.value || quotaAccountId || ""));
   bindJobActions();
   document.querySelectorAll("[data-goto]").forEach((button) => button.addEventListener("click", () => { currentTab = button.dataset.goto; render(); }));
 }
@@ -628,7 +630,7 @@ function inputElement(field, value, profileMode = false) {
   const hint = field.hint ? `<small>${escapeHtml(field.hint)}</small>` : "";
   let input = "";
   if (field.type === "textarea") input = `<textarea id="${id}" data-key="${escapeHtml(field.key)}" placeholder="${escapeHtml(field.placeholder || "")}" rows="3">${escapeHtml(value ?? field.defaultValue ?? "")}</textarea>`;
-  else if (field.type === "json") input = '<textarea id="' + id + '" data-key="' + escapeHtml(field.key) + '" rows="6" spellcheck="false">' + escapeHtml(value ?? field.defaultValue ?? "{}") + '</textarea>';
+  else if (field.type === "json") { const jsonValue = value == null ? (field.defaultValue ?? "{}") : (typeof value === "string" ? value : JSON.stringify(value, null, 2)); input = '<textarea id="' + id + '" data-key="' + escapeHtml(field.key) + '" rows="6" spellcheck="false">' + escapeHtml(jsonValue) + '</textarea>'; }
   else if (field.type === "color") input = '<input id="' + id + '" data-key="' + escapeHtml(field.key) + '" type="color" value="' + escapeHtml(value ?? field.defaultValue ?? "#000000") + '">';
   else if (["date", "time", "datetime-local"].includes(field.type)) input = '<input id="' + id + '" data-key="' + escapeHtml(field.key) + '" type="' + field.type + '" value="' + escapeHtml(value ?? field.defaultValue ?? "") + '">';
   else if (field.type === "checkbox") input = `<label class="inline-actions"><input id="${id}" data-key="${escapeHtml(field.key)}" type="checkbox" ${value === true || (value == null && field.defaultValue === true) ? "checked" : ""}> <span>${label}</span></label>`;
