@@ -1136,20 +1136,22 @@ async function runQueue() {
       render();
 
       // POSTs return event IDs quickly; the Space's own queue handles actual GPU execution.
-      const submissions = [];
       const monitors = [];
-      for (const item of preparedResults) {
-        if (!item || item.error) continue;
+      const submitCandidates = preparedResults.filter((item) => item && !item.error);
+
+      // Fire all prepared POSTs together so one slow request cannot hold up
+      // the rest of this batch. Each accepted event starts its stream as soon
+      // as its event ID is returned.
+      await Promise.all(submitCandidates.map(async (item) => {
         if (queueHalted || controller.signal.aborted) {
           item.job.status = "ready";
           item.job.phase = "";
           item.job.updatedAt = Date.now();
-          continue;
+          return;
         }
         try {
           item.job.phase = "Submitting to Space queue";
           item.job.updatedAt = Date.now();
-          render();
           const submitted = await submitGradioJob(item.prepared, item.timer.signal);
           if (submitted.eventId) {
             item.job.remoteEventId = submitted.eventId;
@@ -1159,10 +1161,6 @@ async function runQueue() {
           }
           item.job.updatedAt = Date.now();
           saveState();
-          const monitored = { ...item, submission: submitted };
-          submissions.push(monitored);
-          // Open the result stream immediately after each event ID arrives, while
-          // the next POST is being submitted. This avoids missing fast completions.
           monitors.push((async () => {
             try {
               const raw = await waitForGradioJob(submitted, item.timer.signal);
@@ -1187,7 +1185,7 @@ async function runQueue() {
         } catch (error) {
           item.retryDelay = failJob(item.job, error, item.tokenSent, item.timer.signal);
         }
-      }
+      }));
       saveState();
       // All accepted jobs now have independent result streams open.
       await Promise.all(monitors);
