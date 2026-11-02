@@ -669,8 +669,8 @@ function openNewJob(modelId = null, profile = null) {
   const files = new Map();
   const profiles = state.profiles.filter((p) => p.modelId === model.id);
   const accounts = [{ id: "", label: "Public / no token" }, ...connectedAccounts().filter((a) => a.enabled).map((a) => ({ id: a.id, label: a.label }))];
-  showDialog(`${dialogHeader("Create generation job", "Choose a Space endpoint, set its parameters, and add the job to the persistent queue.")}
-    <form id="job-form"><div class="field-grid"><div class="field"><label for="job-name">Job name</label><input id="job-name" name="name" maxlength="100" value="${escapeHtml(profile?.name || "")}" placeholder="e.g. cinematic city loop"></div><div class="field"><label for="job-runs">Repeat jobs</label><input id="job-runs" name="runs" type="number" min="1" max="10" step="1" value="1"><small>Stage up to 10 identical runs in one batch. Set the model seed to random when supported for different outputs.</small></div><div class="field"><label for="job-model">Space</label><select id="job-model" name="modelId">${state.models.map((m) => `<option value="${escapeHtml(m.id)}" ${m.id === model.id ? "selected" : ""}>${escapeHtml(m.title)}</option>`).join("")}</select></div><div class="field"><label for="job-api">API endpoint</label><select id="job-api" name="apiName">${model.endpoints.map((ep) => `<option value="${escapeHtml(ep.apiName)}" ${ep.apiName === endpoint.apiName ? "selected" : ""}>/${escapeHtml(ep.apiName)}</option>`).join("")}</select></div><div class="field"><label for="job-account">Account for this job</label><select id="job-account" name="accountId">${accounts.map((a) => `<option value="${escapeHtml(a.id)}" ${String(profile?.accountId || model.accountId || state.settings.lastAccountId || "") === a.id ? "selected" : ""}>${escapeHtml(a.label)}</option>`).join("")}</select><small>Account selection is explicit; tokens are not silently rotated.</small></div></div><div class="section-head"><div><h2>Generation parameters</h2><p>Inputs are created from the live Gradio schema.</p></div></div><div class="field-grid" id="job-fields"></div><div class="field full" style="margin-top:16px"><label class="inline-actions"><input id="job-save-profile" type="checkbox" ${profile ? "checked" : ""}><span>Save these settings as a reusable profile</span></label></div><div class="field ${profile ? "" : "hidden"}" id="job-profile-name-wrap"><label for="job-profile-name">Profile name</label><input id="job-profile-name" value="${escapeHtml(profile?.name || "")}" placeholder="Reusable profile name"></div><div class="form-actions"><button class="button" type="button" data-close>Cancel</button><button class="button button-primary" type="submit">＋ Add to queue</button></div></form>`);
+  showDialog(`${dialogHeader("Build generation job", "Set the prompt, source image, reference images, and model-specific parameters. Stage several runs before starting the GPU queue.")}
+    <form id="job-form"><div class="field-grid"><div class="field"><label for="job-name">Job name</label><input id="job-name" name="name" maxlength="100" value="${escapeHtml(profile?.name || "")}" placeholder="e.g. cinematic city loop"></div><div class="field"><label for="job-runs">Repeat jobs</label><input id="job-runs" name="runs" type="number" min="1" max="10" step="1" value="1"><small>Stage up to 10 identical runs in one batch. Set the model seed to random when supported for different outputs.</small></div><div class="field"><label for="job-model">Space</label><select id="job-model" name="modelId">${state.models.map((m) => `<option value="${escapeHtml(m.id)}" ${m.id === model.id ? "selected" : ""}>${escapeHtml(m.title)}</option>`).join("")}</select></div><div class="field"><label for="job-api">API endpoint</label><select id="job-api" name="apiName">${model.endpoints.map((ep) => `<option value="${escapeHtml(ep.apiName)}" ${ep.apiName === endpoint.apiName ? "selected" : ""}>/${escapeHtml(ep.apiName)}</option>`).join("")}</select></div><div class="field"><label for="job-account">Account for this job</label><select id="job-account" name="accountId">${accounts.map((a) => `<option value="${escapeHtml(a.id)}" ${String(profile?.accountId || model.accountId || state.settings.lastAccountId || "") === a.id ? "selected" : ""}>${escapeHtml(a.label)}</option>`).join("")}</select><small>Account selection is explicit; tokens are not silently rotated.</small></div></div><div class="section-head"><div><h2>Model inputs</h2><p>Controls are generated from this Space’s live Gradio API schema. Source and reference uploads are saved with the queued job.</p></div></div><div class="field-grid" id="job-fields"></div><div class="field full" style="margin-top:16px"><label class="inline-actions"><input id="job-save-profile" type="checkbox" ${profile ? "checked" : ""}><span>Save these settings as a reusable profile</span></label></div><div class="field ${profile ? "" : "hidden"}" id="job-profile-name-wrap"><label for="job-profile-name">Profile name</label><input id="job-profile-name" value="${escapeHtml(profile?.name || "")}" placeholder="Reusable profile name"></div><div class="form-actions"><button class="button" type="button" data-close>Cancel</button><button class="button button-primary" type="submit">＋ Add to queue</button></div></form>`);
   const form = document.querySelector("#job-form");
   const modelSelect = document.querySelector("#job-model"); const apiSelect = document.querySelector("#job-api");
   function refillEndpoints(selectedApi = "") {
@@ -901,8 +901,9 @@ async function submitGradioJob(prepared, signal) {
     });
   } catch (error) {
     if (isAbortError(error)) throw error;
-    error.submissionUncertain = true;
-    throw new Error("The submission connection failed before an event ID was returned. The Space may or may not have accepted it; check the hosted Space queue before retrying to avoid duplicate GPU work. " + error.message);
+    const uncertain = new Error("The submission connection failed before an event ID was returned. The Space may or may not have accepted it; check the hosted Space queue before retrying to avoid duplicate GPU work. " + error.message);
+    uncertain.submissionUncertain = true;
+    throw uncertain;
   }
   if ([404, 405, 501].includes(response.status)) {
     // Legacy Gradio /run is synchronous; only this fallback has to wait here.
@@ -973,9 +974,10 @@ async function runQueue() {
   const jobTimers = new Map();
   currentAbort = controller;
 
-  function failJob(job, error, tokenSent = false) {
-    const cancelled = controller.signal.aborted || isAbortError(error) && controller.signal.aborted;
-    const message = error?.message || String(error);
+  function failJob(job, error, tokenSent = false, timerSignal = null) {
+    const cancelled = controller.signal.aborted;
+    const timedOut = !cancelled && Boolean(timerSignal?.aborted);
+    const message = timedOut ? ("Request timed out after " + Math.round(GEN_TIMEOUT_MS / 60000) + " minutes.") : (error?.message || String(error));
     const kind = cancelled ? "cancelled" : classifyFailure(error?.status, message);
     const until = holdFor(kind, message, error?.resetAt || null);
     job.error = "[" + kind.toUpperCase() + "] " + (cancelled ? "Cancelled locally; the Space may still finish an already-submitted event." : message) +
@@ -983,7 +985,7 @@ async function runQueue() {
     job.updatedAt = Date.now();
     job.phase = "";
     if (cancelled) {
-      job.status = job.remoteEventId ? "paused" : "paused";
+      job.status = "paused";
       queueHalted = true;
     } else if (error?.submissionUncertain) {
       // Never automatically re-submit a POST whose acceptance is unknown.
@@ -1105,7 +1107,7 @@ async function runQueue() {
             entry.job.updatedAt = Date.now();
             preparedResults[index] = { ...entry, prepared };
           } catch (error) {
-            const retryDelay = failJob(entry.job, error, entry.tokenSent);
+            const retryDelay = failJob(entry.job, error, entry.tokenSent, entry.timer.signal);
             preparedResults[index] = { ...entry, error, retryDelay };
           }
         }
@@ -1139,7 +1141,7 @@ async function runQueue() {
           saveState();
           submissions.push({ ...item, submission: submitted });
         } catch (error) {
-          item.retryDelay = failJob(item.job, error, item.tokenSent);
+          item.retryDelay = failJob(item.job, error, item.tokenSent, item.timer.signal);
         }
       }
       saveState();
