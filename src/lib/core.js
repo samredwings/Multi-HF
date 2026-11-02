@@ -351,7 +351,7 @@ export function sanitizeWorkspace(data) {
       apiPrefix: /^\/[\w./-]*$/.test(m.apiPrefix ?? "") ? m.apiPrefix : "/gradio_api",
       activeApi: endpoints.some((e) => e.apiName === m.activeApi) ? m.activeApi : (endpoints[0]?.apiName || ""),
       accountId: text(m.accountId, 100), hardware: text(m.hardware, 80) || "Unknown",
-      fetchedAt: finite(m.fetchedAt) ?? 0, private: m.private === true,
+      fetchedAt: finite(m.fetchedAt) ?? 0, private: m.private === true, sendToken: m.sendToken === true,
     });
   }
   const known = new Set(models.map((m) => m.id));
@@ -363,6 +363,7 @@ export function sanitizeWorkspace(data) {
     id: text(j.id, 100), name: text(j.name, 200), modelId: j.modelId, apiName: text(j.apiName, 100), accountId: text(j.accountId, 100),
     values: record(j.values) ?? {}, files: Array.isArray(j.files) ? j.files.filter((f) => typeof f === "string") : [],
     status: JOB_STATUSES.has(j.status) ? j.status : "failed", error: text(j.error, 2000),
+    remoteEventId: text(j.remoteEventId, 300), phase: text(j.phase, 160), batchId: text(j.batchId, 100),
     result: (Array.isArray(j.result) ? j.result : []).map(cleanResult).filter(Boolean),
     createdAt: finite(j.createdAt) ?? 0, updatedAt: finite(j.updatedAt) ?? 0, startedAt: finite(j.startedAt), finishedAt: finite(j.finishedAt),
     progress: finite(j.progress), attempts: 0,
