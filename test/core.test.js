@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseSpaceInput, parseSpaceConfig, taskFromEndpoints, classifyFailure, holdFor, normalizeOutputs, normalizeHost, normalizeGradioVersion, normalizeSpaceFramework, nextQueueBatch, normalizeZeroGpuQuota } from "../src/lib/core.js";
+import { parseSpaceInput, parseSpaceConfig, taskFromEndpoints, classifyFailure, holdFor, normalizeOutputs, normalizeHost, normalizeGradioVersion, normalizeSpaceFramework, nextQueueBatch, normalizeZeroGpuQuota, admitQueueJobsByQuota } from "../src/lib/core.js";
 
 test("parses accepted Space identifiers and rejects arbitrary hosts", () => {
   assert.deepEqual(parseSpaceInput("owner/space-name"), { id: "owner/space-name", host: null });
@@ -150,4 +150,25 @@ test("maps complex Gradio components to structured JSON instead of invalid text 
   });
   assert.deepEqual(parsed.endpoints[0].fields.map((field) => field.type), ["json", "json", "json", "text"]);
   assert.equal(parsed.endpoints[0].fields[2].defaultValue, JSON.stringify([[1, 2]], null, 2));
+});
+
+
+test("quota admission reserves only jobs that fit the remaining GPU-seconds and run slots", () => {
+  const jobs = Array.from({ length: 7 }, (_, index) => ({
+    id: "job-" + index, reservationSeconds: 60
+  }));
+  const admission = admitQueueJobsByQuota(jobs, {
+    remaining: 300, runs: { remaining: 4 }
+  });
+  assert.deepEqual(admission.admitted.map((job) => job.id), ["job-0", "job-1", "job-2", "job-3"]);
+  assert.equal(admission.held.length, 3);
+  assert.equal(admission.reservedSeconds, 240);
+  assert.equal(admission.remainingSeconds, 60);
+  const custom = admitQueueJobsByQuota([
+    { id: "short-1", reservationSeconds: 30 },
+    { id: "short-2", reservationSeconds: 30 },
+    { id: "long", reservationSeconds: 90 }
+  ], { remaining: 75 });
+  assert.deepEqual(custom.admitted.map((job) => job.id), ["short-1", "short-2"]);
+  assert.equal(custom.held[0].job.id, "long");
 });
