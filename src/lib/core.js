@@ -301,7 +301,14 @@ export function persistableResult(result) {
 /** A job left in "running" by a closed tab must not be stuck forever, and must not silently re-spend quota. */
 export function recoverRunningJobs(jobs, now = Date.now()) {
   return (Array.isArray(jobs) ? jobs : []).map((job) => (job?.status === "running"
-    ? { ...job, status: "paused", error: "Interrupted by a page reload. Retry when ready.", updatedAt: now }
+    ? {
+        ...job,
+        status: "paused",
+        error: job.remoteEventId
+          ? "The browser session was interrupted after this job was submitted to the Space. Resume its result stream to avoid submitting a duplicate GPU task."
+          : "Interrupted by a page reload before a remote event was saved. Retry when ready.",
+        updatedAt: now,
+      }
     : job));
 }
 
