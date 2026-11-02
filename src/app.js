@@ -688,7 +688,7 @@ function openNewJob(modelId = null, profile = null) {
   const profiles = state.profiles.filter((p) => p.modelId === model.id);
   const accounts = [{ id: "", label: "Public / no token" }, ...connectedAccounts().filter((a) => a.enabled).map((a) => ({ id: a.id, label: a.label }))];
   showDialog(`${dialogHeader("Build generation job", "Set the prompt, source image, reference images, and model-specific parameters. Stage several runs before starting the GPU queue.")}
-    <form id="job-form"><div class="field-grid"><div class="field"><label for="job-name">Job name</label><input id="job-name" name="name" maxlength="100" value="${escapeHtml(profile?.name || "")}" placeholder="e.g. cinematic city loop"></div><div class="field"><label for="job-runs">Repeat jobs</label><input id="job-runs" name="runs" type="number" min="1" max="10" step="1" value="1"><small>Stage up to 10 identical runs in one batch. Set the model seed to random when supported for different outputs.</small></div><div class="field"><label for="job-model">Space</label><select id="job-model" name="modelId">${state.models.map((m) => `<option value="${escapeHtml(m.id)}" ${m.id === model.id ? "selected" : ""}>${escapeHtml(m.title)}</option>`).join("")}</select></div><div class="field"><label for="job-api">API endpoint</label><select id="job-api" name="apiName">${model.endpoints.map((ep) => `<option value="${escapeHtml(ep.apiName)}" ${ep.apiName === endpoint.apiName ? "selected" : ""}>/${escapeHtml(ep.apiName)}</option>`).join("")}</select></div><div class="field"><label for="job-account">Account for this job</label><select id="job-account" name="accountId">${accounts.map((a) => `<option value="${escapeHtml(a.id)}" ${String(profile?.accountId || model.accountId || state.settings.lastAccountId || "") === a.id ? "selected" : ""}>${escapeHtml(a.label)}</option>`).join("")}</select><small>For a public ZeroGPU Space, enable “Token: sent” on its Space card only when you trust the owner; the owner can see that token. Otherwise this request is anonymous and may use the lower anonymous quota.</small></div></div><div class="section-head"><div><h2>Model inputs</h2><p>Controls are generated from this Space’s live Gradio API schema. Source and reference uploads are saved with the queued job.</p></div></div><div class="field-grid" id="job-fields"></div><div class="field full" style="margin-top:16px"><label class="inline-actions"><input id="job-save-profile" type="checkbox" ${profile ? "checked" : ""}><span>Save these settings as a reusable profile</span></label></div><div class="field ${profile ? "" : "hidden"}" id="job-profile-name-wrap"><label for="job-profile-name">Profile name</label><input id="job-profile-name" value="${escapeHtml(profile?.name || "")}" placeholder="Reusable profile name"></div><div class="form-actions"><button class="button" type="button" data-close>Cancel</button><button class="button button-primary" type="submit">＋ Add to queue</button></div></form>`);
+    <form id="job-form"><div class="field-grid"><div class="field"><label for="job-name">Job name</label><input id="job-name" name="name" maxlength="100" value="${escapeHtml(profile?.name || "")}" placeholder="e.g. cinematic city loop"></div><div class="field"><label for="job-runs">Repeat jobs</label><input id="job-runs" name="runs" type="number" min="1" max="10" step="1" value="1"><small>Stage up to 10 identical runs in one batch. Set the model seed to random when supported for different outputs.</small></div><div class="field"><label for="job-reservation">GPU reservation estimate (seconds)</label><input id="job-reservation" name="reservationSeconds" type="number" min="1" max="600" step="1" value="${escapeHtml(profile?.reservationSeconds || 60)}"><small>ZeroGPU commonly reserves 60 seconds per call. This lets the queue avoid submitting more jobs than your remaining allowance can cover; it does not change the Space's server-side setting.</small></div><div class="field"><label for="job-model">Space</label><select id="job-model" name="modelId">${state.models.map((m) => `<option value="${escapeHtml(m.id)}" ${m.id === model.id ? "selected" : ""}>${escapeHtml(m.title)}</option>`).join("")}</select></div><div class="field"><label for="job-api">API endpoint</label><select id="job-api" name="apiName">${model.endpoints.map((ep) => `<option value="${escapeHtml(ep.apiName)}" ${ep.apiName === endpoint.apiName ? "selected" : ""}>/${escapeHtml(ep.apiName)}</option>`).join("")}</select></div><div class="field"><label for="job-account">Account for this job</label><select id="job-account" name="accountId">${accounts.map((a) => `<option value="${escapeHtml(a.id)}" ${String(profile?.accountId || model.accountId || state.settings.lastAccountId || "") === a.id ? "selected" : ""}>${escapeHtml(a.label)}</option>`).join("")}</select><small>For a public ZeroGPU Space, enable “Token: sent” on its Space card only when you trust the owner; the owner can see that token. Otherwise this request is anonymous and may use the lower anonymous quota.</small></div></div><div class="section-head"><div><h2>Model inputs</h2><p>Controls are generated from this Space’s live Gradio API schema. Source and reference uploads are saved with the queued job.</p></div></div><div class="field-grid" id="job-fields"></div><div class="field full" style="margin-top:16px"><label class="inline-actions"><input id="job-save-profile" type="checkbox" ${profile ? "checked" : ""}><span>Save these settings as a reusable profile</span></label></div><div class="field ${profile ? "" : "hidden"}" id="job-profile-name-wrap"><label for="job-profile-name">Profile name</label><input id="job-profile-name" value="${escapeHtml(profile?.name || "")}" placeholder="Reusable profile name"></div><div class="form-actions"><button class="button" type="button" data-close>Cancel</button><button class="button button-primary" type="submit">＋ Add to queue</button></div></form>`);
   const form = document.querySelector("#job-form");
   const modelSelect = document.querySelector("#job-model"); const apiSelect = document.querySelector("#job-api");
   function refillEndpoints(selectedApi = "") {
@@ -747,6 +747,7 @@ function openNewJob(modelId = null, profile = null) {
           modelId: chosen.id,
           apiName: ep.apiName,
           accountId,
+          reservationSeconds: Math.max(1, Math.min(600, Number(formData.get("reservationSeconds")) || 60)),
           values: JSON.parse(JSON.stringify(values)),
           files: [...jobFileMap.keys()],
           status: "ready",
@@ -770,6 +771,7 @@ function openNewJob(modelId = null, profile = null) {
             apiName: ep.apiName,
             values: profileValues,
             accountId,
+            reservationSeconds: Math.max(1, Math.min(600, Number(formData.get("reservationSeconds")) || 60)),
             createdAt: existing?.createdAt || Date.now(),
             updatedAt: Date.now(),
           };
@@ -830,7 +832,7 @@ function openJobDetails(jobId) {
     <div class="form-actions"><button class="button" type="button" data-close>Close</button>${job.status === "paused" && job.remoteEventId ? `<button class="button button-primary" id="detail-resume">Resume remote event</button>` : ""}${["failed", "paused"].includes(job.status) ? `<button class="button" id="detail-retry">Retry as new request</button>` : ""}<button class="button" id="detail-clone">Clone job</button></div>`);
   document.querySelector("#detail-resume")?.addEventListener("click", () => { if (!job.remoteEventId) return; job.status = "retry"; job.error = ""; job.phase = "Reconnecting to submitted event"; job.updatedAt = Date.now(); queueHalted = false; saveState(); dialog.close(); currentTab = "queue"; render(); runQueue(); });
   document.querySelector("#detail-retry")?.addEventListener("click", () => { job.status = "retry"; job.error = ""; job.attempts = 0; job.remoteEventId = ""; job.phase = ""; job.quotaResetAt = null; job.updatedAt = Date.now(); queueHalted = false; saveState(); dialog.close(); currentTab = "queue"; render(); ping("Job marked for a fresh generation request."); });
-  document.querySelector("#detail-clone")?.addEventListener("click", () => { const profile = { modelId: job.modelId, apiName: job.apiName, values: job.values, accountId: job.accountId, name: job.name, sourceJobId: job.id }; dialog.close(); openNewJob(job.modelId, profile); });
+  document.querySelector("#detail-clone")?.addEventListener("click", () => { const profile = { modelId: job.modelId, apiName: job.apiName, values: job.values, accountId: job.accountId, reservationSeconds: job.reservationSeconds, name: job.name, sourceJobId: job.id }; dialog.close(); openNewJob(job.modelId, profile); });
 }
 function renderResults(result) {
   if (!result.length) return `<div class="panel"><div class="empty"><div class="empty-mark">◫</div><strong>No media output to show</strong><p>Once the endpoint returns outputs, they will be shown here.</p></div></div>`;
@@ -1115,18 +1117,37 @@ async function runQueue() {
       const freshJobs = batch.filter((job) => !job.remoteEventId);
       if (freshJobs.length && isZeroGpuSpace(model) && (model.private === true || model.sendToken === true) && batch[0].accountId && accountTokens.has(batch[0].accountId)) {
         const quota = await refreshZeroGpuQuota(batch[0].accountId, true);
-        if (quota && (quota.remaining <= 0 || quota.runs?.remaining === 0)) {
+        if (quota) {
+          // ZeroGPU checks the requested reservation before scheduling a call.
+          // Do not flood the Space with more POSTs than the account can reserve.
+          let availableSeconds = quota.remaining;
+          let availableRuns = quota.runs ? quota.runs.remaining : Number.POSITIVE_INFINITY;
+          const admitted = new Set();
           for (const job of freshJobs) {
-            job.status = "paused";
-            job.phase = "";
-            job.error = "The selected account has no ZeroGPU GPU-seconds or run slots remaining. Refresh the quota after its reset, then retry.";
-            job.updatedAt = Date.now();
+            const requested = Math.max(1, Math.min(600, Number(job.reservationSeconds) || 60));
+            if (requested <= availableSeconds && availableRuns > 0) {
+              admitted.add(job.id);
+              availableSeconds -= requested;
+              availableRuns -= 1;
+            } else {
+              job.status = "ready";
+              job.phase = "Waiting for ZeroGPU quota";
+              job.error = "Held before submission: this job estimates " + requested + " GPU-seconds, but the selected account currently has " + Math.floor(quota.remaining) + " GPU-seconds and " + (quota.runs ? quota.runs.remaining + " run slot(s)" : "no reported run limit") + " available. Refresh quota and run again when enough allowance is available.";
+              job.updatedAt = Date.now();
+            }
           }
-          // A remote event is already submitted and consumes no new quota by resuming its result stream.
-          batch = batch.filter((job) => Boolean(job.remoteEventId));
-          saveState();
-          showNotice("No ZeroGPU time remains for new requests. Already-submitted remote events will still be resumed.", "error");
-          if (!batch.length) { queueHalted = true; break; }
+          // Submitted remote events can be resumed without consuming a new slot.
+          batch = batch.filter((job) => Boolean(job.remoteEventId) || admitted.has(job.id));
+          if (admitted.size < freshJobs.length) {
+            saveState();
+            showNotice("The queue is pacing new ZeroGPU submissions to your remaining allowance. Jobs that do not fit stay staged; the queue will check again after this batch.", "error");
+          }
+          if (!batch.length) {
+            queueHalted = true;
+            saveState();
+            showNotice("No new ZeroGPU job fits the remaining GPU-seconds or run slots. The unsent jobs remain staged; refresh quota and run again when the allowance resets.", "error");
+            break;
+          }
         }
       }
 
