@@ -18,6 +18,7 @@ let currentTab = "queue";
 let currentSpaceUi = null;
 let currentSpaceMode = "native";
 const gradioScriptLoads = new Map();
+let loadedGradioVersion = "";
 let queueBusy = false;
 let queueHalted = false;
 let currentAbort = null;
@@ -156,14 +157,23 @@ function renderJobs() {
   bindJobActions();
 }
 function ensureGradioComponent(version) {
-  if (customElements.get("gradio-app")) return Promise.resolve();
+  if (customElements.get("gradio-app")) {
+    return loadedGradioVersion === version
+      ? Promise.resolve()
+      : Promise.reject(new Error("A different Gradio UI version is already active in this browser session. Use the iframe or reload before switching versions."));
+  }
   if (gradioScriptLoads.has(version)) return gradioScriptLoads.get(version);
   const pending = new Promise((resolve, reject) => {
     const script = document.createElement("script");
+    const timeout = setTimeout(() => reject(new Error("The Gradio web component timed out while loading.")), 15000);
     script.type = "module";
     script.src = "https://gradio.s3-us-west-2.amazonaws.com/" + encodeURIComponent(version) + "/gradio.js";
-    script.onload = () => customElements.whenDefined("gradio-app").then(resolve, reject);
-    script.onerror = () => reject(new Error("The matching Gradio web component could not be loaded."));
+    script.onload = () => customElements.whenDefined("gradio-app").then(() => {
+      clearTimeout(timeout);
+      loadedGradioVersion = version;
+      resolve();
+    }, reject);
+    script.onerror = () => { clearTimeout(timeout); reject(new Error("The matching Gradio web component could not be loaded.")); };
     document.head.append(script);
   });
   gradioScriptLoads.set(version, pending);
