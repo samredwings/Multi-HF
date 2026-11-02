@@ -135,3 +135,19 @@ test("ZeroGPU quota normalization accepts current API field names and run limits
   assert.equal(quota.runs.remaining, 3);
   assert.equal(quota.runs.resetsAt, "2030-01-01T00:00:00Z");
 });
+
+
+test("maps complex Gradio components to structured JSON instead of invalid text or file values", () => {
+  const parsed = parseSpaceConfig({
+    components: [
+      { id: 1, type: "imageeditor", props: { label: "Layered reference" } },
+      { id: 2, type: "chatbot", props: { label: "Conversation history", value: [] } },
+      { id: 3, type: "dataframe", props: { label: "Control points", value: [[1, 2]] } },
+      { id: 4, type: "textbox", props: { label: "Prompt" } },
+      { id: 5, type: "image", props: { label: "Result" } }
+    ],
+    dependencies: [{ api_name: "generate", inputs: [1, 2, 3, 4], outputs: [5] }]
+  });
+  assert.deepEqual(parsed.endpoints[0].fields.map((field) => field.type), ["json", "json", "json", "text"]);
+  assert.equal(parsed.endpoints[0].fields[2].defaultValue, JSON.stringify([[1, 2]], null, 2));
+});
