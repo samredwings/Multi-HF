@@ -87,3 +87,36 @@ test("identifies supported Space UI frameworks without assuming every Space is G
   assert.equal(normalizeSpaceFramework("docker"), "docker");
   assert.equal(normalizeSpaceFramework("unknown-runtime"), "unknown");
 });
+
+
+test("maps Gradio gallery and multiple-file inputs for batch jobs", () => {
+  const parsed = parseSpaceConfig({
+    components: [
+      { id: 1, type: "gallery", props: { label: "Reference images" } },
+      { id: 2, type: "file", props: { label: "Source files", file_count: "multiple" } },
+      { id: 3, type: "image", props: { label: "Main image" } },
+      { id: 4, type: "image", props: { label: "Output" } }
+    ],
+    dependencies: [{ api_name: "generate", inputs: [1, 2, 3], outputs: [4] }]
+  });
+  assert.deepEqual(parsed.endpoints[0].fields.map((field) => field.type), ["gallery", "file", "image"]);
+  assert.equal(parsed.endpoints[0].fields[0].multiple, true);
+  assert.equal(parsed.endpoints[0].fields[1].multiple, true);
+  assert.equal(parsed.endpoints[0].fields[2].multiple, false);
+});
+
+test("queue batching preserves order while grouping consecutive Space/account work", async () => {
+  const { nextQueueBatch, normalizeZeroGpuQuota } = await import("../src/lib/core.js");
+  const jobs = [
+    { id: "a1", modelId: "space/a", accountId: "acc1", status: "ready", createdAt: 1 },
+    { id: "b1", modelId: "space/b", accountId: "acc1", status: "ready", createdAt: 2 },
+    { id: "a2", modelId: "space/a", accountId: "acc1", status: "retry", createdAt: 3 },
+    { id: "a3", modelId: "space/a", accountId: "acc2", status: "ready", createdAt: 4 },
+    { id: "done", modelId: "space/a", accountId: "acc1", status: "done", createdAt: 0 }
+  ];
+  assert.deepEqual(nextQueueBatch(jobs).map((job) => job.id), ["a1", "a2"]);
+  assert.deepEqual(normalizeZeroGpuQuota({ base: 300, remaining: 121, resets_at: "2030-01-01T00:00:00Z", overquota_used: 0 }), {
+    base: 300, remaining: 121, resetsAt: "2030-01-01T00:00:00Z", overquotaUsed: 0
+  });
+  assert.throws(() => normalizeZeroGpuQuota({ remaining: "unknown" }), /invalid ZeroGPU quota/i);
+});
