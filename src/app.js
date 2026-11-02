@@ -411,6 +411,9 @@ function inputElement(field, value, profileMode = false) {
   const hint = field.hint ? `<small>${escapeHtml(field.hint)}</small>` : "";
   let input = "";
   if (field.type === "textarea") input = `<textarea id="${id}" data-key="${escapeHtml(field.key)}" placeholder="${escapeHtml(field.placeholder || "")}" rows="3">${escapeHtml(value ?? field.defaultValue ?? "")}</textarea>`;
+  else if (field.type === "json") input = '<textarea id="' + id + '" data-key="' + escapeHtml(field.key) + '" rows="6" spellcheck="false">' + escapeHtml(value ?? field.defaultValue ?? "{}") + '</textarea>';
+  else if (field.type === "color") input = '<input id="' + id + '" data-key="' + escapeHtml(field.key) + '" type="color" value="' + escapeHtml(value ?? field.defaultValue ?? "#000000") + '">';
+  else if (["date", "time", "datetime-local"].includes(field.type)) input = '<input id="' + id + '" data-key="' + escapeHtml(field.key) + '" type="' + field.type + '" value="' + escapeHtml(value ?? field.defaultValue ?? "") + '">';
   else if (field.type === "checkbox") input = `<label class="inline-actions"><input id="${id}" data-key="${escapeHtml(field.key)}" type="checkbox" ${value === true || (value == null && field.defaultValue === true) ? "checked" : ""}> <span>${label}</span></label>`;
   else if (field.type === "select" || field.type === "radio" || field.type === "checkboxgroup") {
     const choices = field.choices || [];
@@ -440,6 +443,7 @@ function collectValues(container, endpoint, fileMap = null) {
       values[field.key] = input.files?.[0] ? { name: input.files[0].name, size: input.files[0].size, mime: input.files[0].type } : null;
     } else if (field.type === "checkbox") values[field.key] = input.checked;
     else if (["number", "slider"].includes(field.type)) values[field.key] = input.value === "" ? null : Number(input.value);
+    else if (field.type === "json") { try { values[field.key] = JSON.parse(input.value); } catch { throw new Error((field.label || field.key) + " must contain valid JSON."); } }
     else values[field.key] = input.value;
   }
   return values;
