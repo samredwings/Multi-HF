@@ -1,5 +1,5 @@
 import {
-  parseSpaceInput, normalizeHost, parseSpaceConfig, normalizeGradioVersion, normalizeSpaceFramework, taskFromEndpoints, classifyFailure, nextQueueBatch, normalizeZeroGpuQuota,
+  parseSpaceInput, normalizeHost, parseSpaceConfig, normalizeGradioVersion, normalizeSpaceFramework, taskFromEndpoints, classifyFailure, nextQueueBatch, normalizeZeroGpuQuota, admitQueueJobsByQuota,
   holdFor, normalizeOutputs, safeId, tokenHeaders, persistableResult, recoverRunningJobs, sanitizeWorkspace, readGradioStream, errorMessage,
 } from "./lib/core.js";
 
@@ -1120,25 +1120,17 @@ async function runQueue() {
         if (quota) {
           // ZeroGPU checks the requested reservation before scheduling a call.
           // Do not flood the Space with more POSTs than the account can reserve.
-          let availableSeconds = quota.remaining;
-          let availableRuns = quota.runs ? quota.runs.remaining : Number.POSITIVE_INFINITY;
-          const admitted = new Set();
-          for (const job of freshJobs) {
-            const requested = Math.max(1, Math.min(600, Number(job.reservationSeconds) || 60));
-            if (requested <= availableSeconds && availableRuns > 0) {
-              admitted.add(job.id);
-              availableSeconds -= requested;
-              availableRuns -= 1;
-            } else {
-              job.status = "ready";
-              job.phase = "Waiting for ZeroGPU quota";
-              job.error = "Held before submission: this job estimates " + requested + " GPU-seconds, but the selected account currently has " + Math.floor(quota.remaining) + " GPU-seconds and " + (quota.runs ? quota.runs.remaining + " run slot(s)" : "no reported run limit") + " available. Refresh quota and run again when enough allowance is available.";
-              job.updatedAt = Date.now();
-            }
+          const admission = admitQueueJobsByQuota(freshJobs, quota);
+          for (const held of admission.held) {
+            held.job.status = "ready";
+            held.job.phase = "Waiting for ZeroGPU quota";
+            held.job.error = "Held before submission: this job estimates " + held.requestedSeconds + " GPU-seconds, but the selected account currently has " + Math.floor(quota.remaining) + " GPU-seconds and " + (quota.runs ? quota.runs.remaining + " run slot(s)" : "no reported run limit") + " available. Refresh quota and run again when enough allowance is available.";
+            held.job.updatedAt = Date.now();
           }
+          const admittedIds = new Set(admission.admitted.map((job) => job.id));
           // Submitted remote events can be resumed without consuming a new slot.
-          batch = batch.filter((job) => Boolean(job.remoteEventId) || admitted.has(job.id));
-          if (admitted.size < freshJobs.length) {
+          batch = batch.filter((job) => Boolean(job.remoteEventId) || admittedIds.has(job.id));
+          if (admission.held.length) {
             saveState();
             showNotice("The queue is pacing new ZeroGPU submissions to your remaining allowance. Jobs that do not fit stay staged; the queue will check again after this batch.", "error");
           }
