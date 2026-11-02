@@ -1,5 +1,5 @@
 import {
-  parseSpaceInput, normalizeHost, parseSpaceConfig, normalizeGradioVersion, normalizeSpaceFramework, taskFromEndpoints, classifyFailure, nextQueueBatch, normalizeZeroGpuQuota, admitQueueJobsByQuota,
+  parseSpaceInput, normalizeHost, parseSpaceConfig, normalizeGradioVersion, normalizeSpaceFramework, taskFromEndpoints, classifyFailure, nextQueueBatch, normalizeZeroGpuQuota, admitQueueJobsByQuota, limitQueueBatchWithoutQuota,
   holdFor, normalizeOutputs, safeId, tokenHeaders, persistableResult, recoverRunningJobs, sanitizeWorkspace, readGradioStream, errorMessage,
 } from "./lib/core.js";
 
@@ -1115,11 +1115,13 @@ async function runQueue() {
       }
 
       const freshJobs = batch.filter((job) => !job.remoteEventId);
-      if (freshJobs.length && isZeroGpuSpace(model) && (model.private === true || model.sendToken === true) && batch[0].accountId && accountTokens.has(batch[0].accountId)) {
-        const quota = await refreshZeroGpuQuota(batch[0].accountId, true);
+      if (freshJobs.length && isZeroGpuSpace(model)) {
+        // The personal quota only applies when this request sends the account token.
+        // For token-backed jobs, use the live quota API to safely fill the allowance.
+        const usesAccountQuota = (model.private === true || model.sendToken === true) &&
+          batch[0].accountId && accountTokens.has(batch[0].accountId);
+        const quota = usesAccountQuota ? await refreshZeroGpuQuota(batch[0].accountId, true) : null;
         if (quota) {
-          // ZeroGPU checks the requested reservation before scheduling a call.
-          // Do not flood the Space with more POSTs than the account can reserve.
           const admission = admitQueueJobsByQuota(freshJobs, quota);
           for (const held of admission.held) {
             held.job.status = "ready";
@@ -1128,17 +1130,32 @@ async function runQueue() {
             held.job.updatedAt = Date.now();
           }
           const admittedIds = new Set(admission.admitted.map((job) => job.id));
-          // Submitted remote events can be resumed without consuming a new slot.
           batch = batch.filter((job) => Boolean(job.remoteEventId) || admittedIds.has(job.id));
           if (admission.held.length) {
             saveState();
-            showNotice("The queue is pacing new ZeroGPU submissions to your remaining allowance. Jobs that do not fit stay staged; the queue will check again after this batch.", "error");
+            showNotice("The queue is pacing new ZeroGPU submissions to the verified remaining allowance. Jobs that do not fit stay staged.", "error");
           }
           if (!batch.length) {
             queueHalted = true;
             saveState();
-            showNotice("No new ZeroGPU job fits the remaining GPU-seconds or run slots. The unsent jobs remain staged; refresh quota and run again when the allowance resets.", "error");
+            showNotice("No new ZeroGPU job fits the remaining GPU-seconds or run slots. Unsent jobs remain staged; refresh quota and run again when allowance is available.", "error");
             break;
+          }
+        } else {
+          // Never fan out an unknown number of GPU reservations. Continue one
+          // fresh request at a time, rechecking after it completes; this avoids
+          // exhausting a 5-minute allowance with a burst of blind submissions.
+          const safeBatch = limitQueueBatchWithoutQuota(batch);
+          for (const held of batch.filter((job) => !safeBatch.includes(job) && !job.remoteEventId)) {
+            held.status = "ready";
+            held.phase = "Waiting for quota-safe turn";
+            held.error = "Not submitted yet: quota could not be verified, so Multi-HF is sending ZeroGPU jobs one at a time to avoid over-reserving the free allowance.";
+            held.updatedAt = Date.now();
+          }
+          batch = safeBatch;
+          if (freshJobs.length > 1) {
+            saveState();
+            showNotice("ZeroGPU quota could not be verified (or the request is anonymous). Multi-HF is limiting this Space to one new generation at a time; grant billing-usage read permission to safely batch up to the verified allowance.", "error");
           }
         }
       }
