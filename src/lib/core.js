@@ -4,6 +4,15 @@ const LAYOUT = new Set([
 ]);
 const KNOWN_HF_HOSTS = new Set(["huggingface.co", "www.huggingface.co", "hf.co"]);
 
+export function normalizeGradioVersion(...candidates) {
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") continue;
+    const value = candidate.trim().replace(/^v/i, "");
+    if (/^\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?$/.test(value)) return value;
+  }
+  return "";
+}
+
 export function stripEmoji(value) {
   return String(value ?? "").replace(/\p{Extended_Pictographic}/gu, "").replace(/[\u200d\ufe0f]/g, "").replace(/\s+/g, " ").trim();
 }
@@ -60,6 +69,11 @@ function typeFor(rawType, props) {
   const type = String(rawType || "textbox").toLowerCase();
   if (LAYOUT.has(type)) return "skip";
   if (type === "textbox") return Number(props.lines ?? 1) > 1 || /prompt|caption|description|negative/i.test(String(props.label ?? "")) ? "textarea" : "text";
+  if (type === "json") return "json";
+  if (type === "colorpicker") return "color";
+  if (type === "date") return "date";
+  if (type === "time") return "time";
+  if (type === "datetime") return "datetime-local";
   if (type === "slider") return "slider";
   if (type === "number") return "number";
   if (type === "checkbox") return "checkbox";
@@ -77,6 +91,7 @@ function defaultFor(type, value, choices) {
   if (type === "checkboxgroup") return Array.isArray(value) ? value.map(String) : [];
   if (["number", "slider"].includes(type)) return typeof value === "number" ? value : (value ?? null);
   if (["select", "radio"].includes(type)) return value == null ? (choices[0]?.value ?? "") : String(value);
+  if (type === "json") { try { return JSON.stringify(value ?? {}, null, 2); } catch { return "{}"; } }
   return typeof value === "string" ? value : "";
 }
 function toField(component) {
@@ -96,6 +111,7 @@ function toField(component) {
     passthrough: hidden && props.value && typeof props.value === "object" ? props.value : undefined,
   };
   if (["image", "video", "audio", "file"].includes(type)) field.defaultValue = null;
+  if (type === "json" && typeof props.value === "string") field.defaultValue = props.value;
   return field;
 }
 function score(endpoint) {
@@ -142,7 +158,12 @@ export function parseSpaceConfig(config) {
   const media = endpoints.filter((ep) => ep.outputs.some((out) => ["image", "video", "audio", "gallery", "file"].includes(out.type)));
   const ordered = (media.length ? media : endpoints).slice().sort((a, b) => score(b) - score(a));
   if (!ordered.length) throw new Error("No runnable API endpoints were found in this Space configuration.");
-  return { title: stripEmoji(root.title) || "Hugging Face Space", apiPrefix: typeof root.api_prefix === "string" && root.api_prefix.startsWith("/") ? root.api_prefix : "/gradio_api", endpoints: ordered.slice(0, 12) };
+  return {
+    title: stripEmoji(root.title) || "Hugging Face Space",
+    apiPrefix: typeof root.api_prefix === "string" && root.api_prefix.startsWith("/") ? root.api_prefix : "/gradio_api",
+    gradioVersion: normalizeGradioVersion(root.version, root.gradio_version, root.gradioVersion),
+    endpoints: ordered.slice(0, 12),
+  };
 }
 export function taskFromEndpoints(endpoints) {
   const types = endpoints.flatMap((endpoint) => endpoint.outputs.map((out) => out.type));
@@ -228,7 +249,7 @@ export function tokenHeaders(token, url, { privateSpace = false } = {}) {
 const MAX_INLINE_STORED = 50_000;
 const JOB_STATUSES = new Set(["ready", "retry", "running", "done", "failed", "paused"]);
 const RESULT_KINDS = new Set(["image", "video", "audio", "file", "text"]);
-const FIELD_TYPES = new Set(["text", "textarea", "number", "slider", "checkbox", "checkboxgroup", "select", "radio", "image", "video", "audio", "file"]);
+const FIELD_TYPES = new Set(["text", "textarea", "json", "color", "date", "time", "datetime-local", "number", "slider", "checkbox", "checkboxgroup", "select", "radio", "image", "video", "audio", "file"]);
 const text = (value, max = 500) => (typeof value === "string" ? value.slice(0, max) : "");
 const finite = (value) => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
 
@@ -277,6 +298,7 @@ export function sanitizeWorkspace(data) {
     if (!endpoints.length) continue;
     models.push({
       id: text(m.id, 200), kind: "space", host, endpoints,
+      gradioVersion: normalizeGradioVersion(m.gradioVersion),
       ref: /^[\w.-]+\/[\w.-]+$/.test(m.ref ?? "") ? m.ref : "",
       title: text(m.title, 200) || host, note: text(m.note, 200),
       task: ["image", "video", "other"].includes(m.task) ? m.task : "other",
