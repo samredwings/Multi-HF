@@ -185,7 +185,7 @@ const POLICY = /content policy|safety filter|moderation|nsfw filter|flagged as|b
 const AUTH = /invalid token|unauthorized|\b401\b|expired token|not authenticated|authentication required/i;
 const QUOTA = /zero\s*gpu|gpu quota|quota exceeded|out of credits|insufficient credit|payment required|monthly (included )?credit|depleted|spend limit|exceeded your (free|gpu|quota)|no gpu quota/i;
 const WAKING = /asleep|waking|is starting|space is (sleep|start|build|paused)|currently loading|loading (the )?model|model is loading|building replica/i;
-const TRANSIENT = /timeout|timed out|econnreset|socket hang up|network|fetch failed|bad gateway|gateway timeout|connection (closed|reset|dropped|aborted)|runtime (has )?(ended|expired)|upstream|overloaded|rate limit|too many requests|\b429\b|\b502\b|\b503\b|\b504\b|\b524\b|disconnected/i;
+const TRANSIENT = /timeout|timed out|econnreset|socket hang up|network|fetch failed|failed to fetch|load failed|operation was aborted|request aborted|bad gateway|gateway timeout|connection (closed|reset|dropped|aborted)|runtime (has )?(ended|expired)|upstream|overloaded|rate limit|too many requests|\b429\b|\b502\b|\b503\b|\b504\b|\b524\b|disconnected/i;
 export function classifyFailure(status, message = "") {
   const text = `${status ?? ""} ${message}`;
   if (POLICY.test(text)) return "policy";
