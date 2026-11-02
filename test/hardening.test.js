@@ -73,6 +73,8 @@ test("workspace import keeps UI-only Spaces with a recognized framework", () => 
   });
   assert.deepEqual(imported.models.map((item) => item.framework), ["streamlit", "gradio"]);
   assert.equal(imported.models[1].activeApi, "");
+  const zeroGpu = sanitizeWorkspace({ models: [{ ...model, zeroGpu: true }], profiles: [], jobs: [], accounts: [] });
+  assert.equal(zeroGpu.models[0].zeroGpu, true);
 });
 
 
