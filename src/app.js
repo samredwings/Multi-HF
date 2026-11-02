@@ -133,6 +133,18 @@ async function getJobAttachments(job) {
   jobFiles.set(job.id, files);
   return files;
 }
+async function clearAllJobAttachments() {
+  jobFiles.clear();
+  if (!("indexedDB" in window)) return;
+  const db = await openAttachmentDb();
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction("attachments", "readwrite");
+    tx.objectStore("attachments").clear();
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error || new Error("Could not clear old job attachments."));
+    tx.onabort = () => reject(tx.error || new Error("Attachment cleanup was cancelled."));
+  });
+}
 function isFileField(field) {
   return ["image", "video", "audio", "file", "gallery"].includes(field?.type);
 }
@@ -1342,11 +1354,25 @@ function exportWorkspace() {
   const blob = new Blob([JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), workspace: { ...state, accounts: state.accounts.map(({ token, connected, ...account }) => ({ ...account, connected: false })) } }, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = `multi-hf-workspace-${new Date().toISOString().slice(0, 10)}.json`; a.click(); URL.revokeObjectURL(url); ping("Workspace exported. Account tokens are excluded.");
 }
-function importWorkspace(data) {
+async function importWorkspace(data) {
+  if (queueBusy) {
+    showNotice("Pause or cancel the active queue before importing a different workspace.", "error");
+    return false;
+  }
   const imported = sanitizeWorkspace(data);
-  if (!confirm(`Import ${imported.models.length} Space(s), ${imported.profiles.length} profile(s) and ${imported.jobs.length} job(s), replacing the current workspace? Tokens are never imported.`)) return;
+  if (!confirm(`Import ${imported.models.length} Space(s), ${imported.profiles.length} profile(s) and ${imported.jobs.length} job(s), replacing the current workspace? Tokens are never imported. Binary attachments are not included in workspace exports.`)) return false;
+  // Binary uploads live outside the JSON export in IndexedDB. Clear them on
+  // workspace replacement so a matching imported job ID can never inherit
+  // an old local image/reference file by accident.
+  await clearAllJobAttachments();
   state = imported;
-  accountTokens.clear(); jobFiles.clear(); saveState(); render(); ping("Workspace imported. Reconnect accounts to use private Spaces.");
+  accountTokens.clear();
+  quotaState = { data: null, error: "", loading: false, accountId: "", checkedAt: 0 };
+  quotaAccountId = "";
+  saveState();
+  render();
+  ping("Workspace imported. Reconnect accounts and reattach any missing files.");
+  return true;
 }
 document.querySelectorAll("[data-tab]").forEach((button) => button.addEventListener("click", () => { currentSpaceUi = null; currentTab = button.dataset.tab; render(); }));
 document.querySelector("#quick-add").addEventListener("click", () => openNewJob());
@@ -1354,7 +1380,7 @@ document.querySelector("#export-data").addEventListener("click", exportWorkspace
 document.querySelector("#import-data").addEventListener("click", () => document.querySelector("#import-file").click());
 document.querySelector("#import-file").addEventListener("change", async (event) => {
   const file = event.target.files?.[0]; if (!file) return;
-  try { importWorkspace(JSON.parse(await file.text())); } catch (error) { ping(error.message || "Could not import this file."); }
+  try { await importWorkspace(JSON.parse(await file.text())); } catch (error) { ping(error.message || "Could not import this file."); }
   event.target.value = "";
 });
 dialog.addEventListener("click", (event) => { if (event.target === dialog) dialog.close(); });
