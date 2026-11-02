@@ -1,5 +1,5 @@
 import {
-  parseSpaceInput, normalizeHost, parseSpaceConfig, normalizeGradioVersion, normalizeSpaceFramework, taskFromEndpoints, classifyFailure,
+  parseSpaceInput, normalizeHost, parseSpaceConfig, normalizeGradioVersion, normalizeSpaceFramework, taskFromEndpoints, classifyFailure, nextQueueBatch, normalizeZeroGpuQuota,
   holdFor, normalizeOutputs, safeId, tokenHeaders, persistableResult, recoverRunningJobs, sanitizeWorkspace, readGradioStream, errorMessage,
 } from "./lib/core.js";
 
@@ -22,11 +22,114 @@ let loadedGradioVersion = "";
 let queueBusy = false;
 let queueHalted = false;
 let currentAbort = null;
+let attachmentDbPromise = null;
+let quotaAccountId = "";
+let quotaState = { data: null, error: "", loading: false, accountId: "", checkedAt: 0 };
 let toastTimer;
 let saveTimer;
 const GEN_TIMEOUT_MS = 15 * 60 * 1000;
 const META_TIMEOUT_MS = 30 * 1000;
 const MAX_AUTO_RETRIES = 2;
+
+const ATTACHMENT_DB_NAME = "multi-hf.attachments.v1";
+const ATTACHMENT_DB_VERSION = 1;
+function openAttachmentDb() {
+  if (attachmentDbPromise) return attachmentDbPromise;
+  if (!("indexedDB" in window)) return Promise.reject(new Error("This browser does not support persistent file attachments. Use a browser with IndexedDB enabled."));
+  attachmentDbPromise = new Promise((resolve, reject) => {
+    const request = indexedDB.open(ATTACHMENT_DB_NAME, ATTACHMENT_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains("attachments")) {
+        const store = db.createObjectStore("attachments", { keyPath: "id" });
+        store.createIndex("jobId", "jobId", { unique: false });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("Could not open attachment storage."));
+    request.onblocked = () => reject(new Error("Attachment storage is blocked by another open app tab. Close older Multi-HF tabs and retry."));
+  });
+  return attachmentDbPromise;
+}
+function normalizeSelectedFiles(value) {
+  if (!value) return [];
+  return (Array.isArray(value) ? value : [value]).filter(Boolean);
+}
+async function persistJobAttachments(jobId, fileMap) {
+  if (!fileMap?.size) return;
+  const db = await openAttachmentDb();
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction("attachments", "readwrite");
+    const store = tx.objectStore("attachments");
+    for (const [key, value] of fileMap.entries()) {
+      const files = normalizeSelectedFiles(value).map((file) => ({
+        blob: file.blob || file,
+        name: file.name || "upload",
+        type: file.type || file.mime || "application/octet-stream",
+        size: Number(file.size || 0),
+        lastModified: Number(file.lastModified || Date.now()),
+      }));
+      store.put({ id: `${jobId}:${key}`, jobId, key, files });
+    }
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error || new Error("Could not save an uploaded file."));
+    tx.onabort = () => reject(tx.error || new Error("File attachment storage was cancelled."));
+  });
+}
+async function loadJobAttachments(jobId) {
+  const db = await openAttachmentDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("attachments", "readonly");
+    const request = tx.objectStore("attachments").index("jobId").getAll(jobId);
+    request.onsuccess = () => {
+      const result = new Map();
+      for (const record of request.result || []) {
+        const restored = (record.files || []).map((item) => ({
+          blob: item.blob,
+          name: item.name || "upload",
+          type: item.type || "application/octet-stream",
+          size: Number(item.size || item.blob?.size || 0),
+          lastModified: Number(item.lastModified || Date.now()),
+        }));
+        if (restored.length) result.set(record.key, restored.length === 1 ? restored[0] : restored);
+      }
+      resolve(result);
+    };
+    request.onerror = () => reject(request.error || new Error("Could not restore saved file attachments."));
+  });
+}
+async function deleteJobAttachments(jobId) {
+  try {
+    const db = await openAttachmentDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction("attachments", "readwrite");
+      const request = tx.objectStore("attachments").index("jobId").openKeyCursor(IDBKeyRange.only(jobId));
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (cursor) { tx.objectStore("attachments").delete(cursor.primaryKey); cursor.continue(); }
+      };
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error || new Error("Could not remove saved attachments."));
+    });
+    jobFiles.delete(jobId);
+  } catch (error) { console.warn("[Multi-HF] Attachment cleanup failed:", error); }
+}
+async function getJobAttachments(job) {
+  if (jobFiles.has(job.id)) return jobFiles.get(job.id);
+  const files = await loadJobAttachments(job.id);
+  jobFiles.set(job.id, files);
+  return files;
+}
+function isFileField(field) {
+  return ["image", "video", "audio", "file", "gallery"].includes(field?.type);
+}
+function fileMeta(file) {
+  return { name: file.name || "upload", size: Number(file.size || 0), mime: file.type || "application/octet-stream" };
+}
+function formatGpuTime(seconds) {
+  const safe = Math.max(0, Math.floor(Number(seconds) || 0));
+  return `${Math.floor(safe / 60)}m ${String(safe % 60).padStart(2, "0")}s`;
+}
 
 function readWorkspace() {
   try {
@@ -117,30 +220,53 @@ function statusBadge(status) {
   const text = { ready: "READY", retry: "RETRY", running: "RUNNING", done: "COMPLETE", failed: "FAILED", paused: "PAUSED" }[status] || String(status || "UNKNOWN").toUpperCase();
   return `<span class="badge ${cls}">${escapeHtml(text)}</span>`;
 }
+function renderQuotaPanel() {
+  const accounts = connectedAccounts();
+  const preferred = quotaAccountId || state.settings.lastAccountId || accounts[0]?.id || "";
+  const options = accounts.map((account) => `<option value="${escapeHtml(account.id)}" ${account.id === preferred ? "selected" : ""}>${escapeHtml(account.label)}</option>`).join("");
+  let quotaBody = "";
+  if (!accounts.length) quotaBody = '<p class="help">Connect a Hugging Face account to check its ZeroGPU allowance. The queue can still run public Spaces without a token.</p>';
+  else if (quotaState.loading) quotaBody = '<p class="help">Checking the selected account’s ZeroGPU quota…</p>';
+  else if (quotaState.data && quotaState.accountId === preferred) {
+    const quota = quotaState.data;
+    const pct = quota.base > 0 ? Math.max(0, Math.min(100, quota.remaining / quota.base * 100)) : 0;
+    quotaBody = `<div class="quota-metrics"><div><span class="muted">Remaining</span><strong>${formatGpuTime(quota.remaining)}</strong></div><div><span class="muted">Daily allowance</span><strong>${formatGpuTime(quota.base)}</strong></div><div><span class="muted">Paid overage used</span><strong>${formatGpuTime(quota.overquotaUsed)}</strong></div></div><div class="quota-meter"><span style="width:${pct}%"></span></div><p class="help">${quota.resetsAt ? "Quota resets " + escapeHtml(fmtDate(quota.resetsAt)) : "Reset time not reported yet"} · refreshed ${escapeHtml(timeAgo(quotaState.checkedAt))}</p>`;
+  } else if (quotaState.error && quotaState.accountId === preferred) quotaBody = `<p class="help">${escapeHtml(quotaState.error)}</p>`;
+  else quotaBody = '<p class="help">Check your account’s remaining ZeroGPU GPU-seconds. Requires a fine-grained token with “Billing → Read billing usage and payment method status” permission.</p>';
+  return `<div class="panel quota-panel"><div class="panel-head"><div><h2>ZeroGPU allowance</h2><div class="subtext">Live GPU-seconds for the selected Hugging Face account</div></div><div class="inline-actions">${accounts.length ? `<select id="quota-account" aria-label="Quota account">${options}</select>` : ""}<button class="button button-sm" id="quota-refresh" ${!accounts.length || quotaState.loading ? "disabled" : ""}>${quotaState.loading ? "Checking…" : "Refresh quota"}</button></div></div><div class="panel-body">${quotaBody}</div></div>`;
+}
 function renderQueue() {
   const ready = waitingJobs().length;
   const done = state.jobs.filter((job) => job.status === "done").length;
   const paused = state.jobs.filter((job) => job.status === "paused").length;
   const failed = state.jobs.filter((job) => job.status === "failed").length;
-  const rows = state.jobs.filter((job) => job.status !== "done").slice().reverse().slice(0, 12);
+  const rows = state.jobs.filter((job) => job.status !== "done").slice().reverse().slice(0, 16);
+  const running = state.jobs.filter((job) => job.status === "running").length;
   view.innerHTML = `
-    <div class="stats">${stat("Pending jobs", ready, "Waiting to run")}${stat("Completed", done, "Finished successfully")}${stat("Paused", paused, "Needs a manual decision")}${stat("Failed", failed, "Review the error details")}</div>
-    <div class="section-head"><div><h2>Queue workspace</h2><p>Jobs run one at a time to keep Space state predictable.</p></div><div class="inline-actions"><button class="button button-quiet" id="queue-pause" ${queueBusy ? "" : "disabled"}>Pause queue</button><button class="button button-quiet" id="queue-cancel" ${queueBusy ? "" : "disabled"}>Cancel running job</button><button class="button button-primary" id="queue-run" ${queueBusy || !ready ? "disabled" : ""}>▶ Run queue</button></div></div>
-    <div class="panel"><div class="panel-head"><div><h2>Upcoming & active</h2><div class="subtext">${queueBusy ? "A job is currently running." : queueHalted ? "Queue is paused after a quota/resource failure." : "Ready when you are."}</div></div><button class="button button-sm" id="queue-add">＋ Add job</button></div>
-    ${rows.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>Job</th><th>Space</th><th>Status</th><th>Updated</th><th>Action</th></tr></thead><tbody>${rows.map(jobRow).join("")}</tbody></table></div>` : `<div class="empty"><div class="empty-mark">▦</div><strong>Your queue is clear</strong><p>Add a Hugging Face Space, create a profile, and enqueue a generation job. Results and queue state stay in this browser.</p><button class="button button-primary" id="queue-empty-add">＋ Create first job</button></div>`}</div>
+    <div class="stats">${stat("Pending jobs", ready, "Waiting to run")}${stat("In progress", running, "Preparing or running on a Space")}${stat("Completed", done, "Finished successfully")}${stat("Paused / failed", paused + failed, "Review before retrying")}</div>
+    <div class="section-head"><div><h2>Queue workspace</h2><p>The scheduler groups jobs by Space and account, prepares all uploads first, then submits the batch to the Space queue.</p></div><div class="inline-actions"><button class="button button-quiet" id="queue-pause" ${queueBusy ? "" : "disabled"}>Pause queue</button><button class="button button-quiet" id="queue-cancel" ${queueBusy ? "" : "disabled"}>Cancel active batch</button><button class="button button-primary" id="queue-run" ${queueBusy || !ready ? "disabled" : ""}>▶ Run queue (${ready})</button></div></div>
+    ${renderQuotaPanel()}
+    <div class="panel"><div class="panel-head"><div><h2>Upcoming & active</h2><div class="subtext">${queueBusy ? "The active Space batch is being prepared or processed." : queueHalted ? "Queue is paused. Review the affected job before continuing." : "Jobs are staged and will run when you start the queue."}</div></div><button class="button button-sm" id="queue-add">＋ Add job</button></div>
+    ${rows.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>Job</th><th>Space</th><th>Status</th><th>Updated</th><th>Action</th></tr></thead><tbody>${rows.map(jobRow).join("")}</tbody></table></div>` : `<div class="empty"><div class="empty-mark">▦</div><strong>Your queue is clear</strong><p>Add a Hugging Face Space, configure its prompt and image/reference inputs, then stage one or more runs before starting the batch.</p><button class="button button-primary" id="queue-empty-add">＋ Create first job</button></div>`}</div>
     <div class="section-head"><div><h2>Latest results</h2><p>Open a completed job to view its output gallery.</p></div><button class="button button-quiet button-sm" data-goto="jobs">View all jobs ↗</button></div>
     ${renderRecentResults()}`;
   document.querySelector("#queue-run")?.addEventListener("click", () => runQueue());
-  document.querySelector("#queue-pause")?.addEventListener("click", () => { queueHalted = true; ping("Queue paused. The active request may finish before stopping."); });
-  document.querySelector("#queue-cancel")?.addEventListener("click", () => { queueHalted = true; currentAbort?.abort(); ping("Cancelling the active request. The Space may still finish on its side."); });
+  document.querySelector("#queue-pause")?.addEventListener("click", () => { queueHalted = true; ping("Queue paused. The active Space batch will be allowed to finish."); render(); });
+  document.querySelector("#queue-cancel")?.addEventListener("click", () => { queueHalted = true; currentAbort?.abort(); ping("Cancelling the active batch. Requests already accepted by the Space may still finish remotely."); render(); });
   ["queue-add", "queue-empty-add"].forEach((id) => document.querySelector(`#${id}`)?.addEventListener("click", () => openNewJob()));
+  document.querySelector("#quota-account")?.addEventListener("change", (event) => { quotaAccountId = event.target.value; quotaState = { data: null, error: "", loading: false, accountId: "", checkedAt: 0 }; render(); });
+  document.querySelector("#quota-refresh")?.addEventListener("click", () => refreshZeroGpuQuota(quotaAccountId || state.settings.lastAccountId || connectedAccounts()[0]?.id || ""));
   bindJobActions();
   document.querySelectorAll("[data-goto]").forEach((button) => button.addEventListener("click", () => { currentTab = button.dataset.goto; render(); }));
 }
 function jobRow(job) {
   const model = getModel(job.modelId);
   const title = job.name || job.values?.prompt || job.apiName || "Generation job";
-  return `<tr><td><div><strong>${escapeHtml(String(title).slice(0, 80))}</strong><div class="subtext">${escapeHtml(job.apiName || "API")}</div></div></td><td>${escapeHtml(model?.title || job.modelId)}<div class="subtext">${escapeHtml(model?.ref || model?.host || "Space")}</div></td><td>${statusBadge(job.status)}${job.error ? `<div class="subtext">${escapeHtml(job.error)}</div>` : ""}</td><td>${escapeHtml(fmtDate(job.updatedAt || job.createdAt))}</td><td><div class="inline-actions"><button class="button button-sm" data-job-open="${escapeHtml(job.id)}">Details</button>${["failed", "paused"].includes(job.status) ? `<button class="button button-sm" data-job-retry="${escapeHtml(job.id)}">Retry</button>` : ""}</div></td></tr>`;
+  const stateText = job.phase ? `<div class="subtext">${escapeHtml(job.phase)}</div>` : job.error ? `<div class="subtext">${escapeHtml(job.error)}</div>` : "";
+  const action = job.status === "paused" && job.remoteEventId
+    ? `<button class="button button-sm" data-job-resume="${escapeHtml(job.id)}">Resume remote</button>`
+    : ["failed", "paused"].includes(job.status) ? `<button class="button button-sm" data-job-retry="${escapeHtml(job.id)}">Retry new run</button>` : "";
+  return `<tr><td><div><strong>${escapeHtml(String(title).slice(0, 80))}</strong><div class="subtext">${escapeHtml(job.apiName || "API")}</div></div></td><td>${escapeHtml(model?.title || job.modelId)}<div class="subtext">${escapeHtml(model?.ref || model?.host || "Space")}</div></td><td>${statusBadge(job.status)}${stateText}</td><td>${escapeHtml(fmtDate(job.updatedAt || job.createdAt))}</td><td><div class="inline-actions"><button class="button button-sm" data-job-open="${escapeHtml(job.id)}">Details</button>${action}</div></td></tr>`;
 }
 function renderRecentResults() {
   const completed = state.jobs.filter((job) => job.status === "done" && Array.isArray(job.result) && job.result.length).slice(-3).reverse();
@@ -303,7 +429,12 @@ function bindJobActions() {
   document.querySelectorAll("[data-job-retry]").forEach((button) => button.addEventListener("click", () => {
     const job = state.jobs.find((item) => item.id === button.dataset.jobRetry);
     if (!job) return;
-    job.status = "retry"; job.error = ""; job.attempts = 0; job.updatedAt = Date.now(); job.quotaResetAt = null; queueHalted = false; saveState(); render(); ping("Job queued for manual retry.");
+    job.status = "retry"; job.error = ""; job.attempts = 0; job.remoteEventId = ""; job.phase = ""; job.updatedAt = Date.now(); job.quotaResetAt = null; queueHalted = false; saveState(); render(); ping("Job queued as a fresh generation request.");
+  }));
+  document.querySelectorAll("[data-job-resume]").forEach((button) => button.addEventListener("click", () => {
+    const job = state.jobs.find((item) => item.id === button.dataset.jobResume);
+    if (!job?.remoteEventId) return;
+    job.status = "retry"; job.error = ""; job.phase = "Reconnecting to the submitted Space task"; job.updatedAt = Date.now(); queueHalted = false; saveState(); render(); runQueue();
   }));
 }
 function openAccountDialog(existing = null) {
