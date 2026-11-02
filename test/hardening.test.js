@@ -8,6 +8,8 @@ test("token goes to the Hub, and to hf.space only for private Spaces", () => {
   assert.deepEqual(tokenHeaders("t", "https://huggingface.co/api/spaces/a/b"), { Authorization: "Bearer t" });
   assert.deepEqual(tokenHeaders("t", "https://evil.hf.space/config"), {});
   assert.deepEqual(tokenHeaders("t", "https://own.hf.space/config", { privateSpace: true }), { Authorization: "Bearer t" });
+  assert.deepEqual(tokenHeaders("t", "https://public-space.hf.space/gradio_api/call/generate", { allowPublicSpace: true }), { Authorization: "Bearer t" });
+  assert.deepEqual(tokenHeaders("t", "https://public-space.hf.space/gradio_api/call/generate", { allowPublicSpace: false }), {});
   assert.deepEqual(tokenHeaders("t", "https://attacker.example/x", { privateSpace: true }), {});
   assert.deepEqual(tokenHeaders("t", "http://huggingface.co/api"), {});
   assert.deepEqual(tokenHeaders("t", "https://huggingface.co.evil.com/"), {});
