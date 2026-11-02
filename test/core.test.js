@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseSpaceInput, parseSpaceConfig, taskFromEndpoints, classifyFailure, holdFor, normalizeOutputs, normalizeHost, normalizeGradioVersion, normalizeSpaceFramework, nextQueueBatch, normalizeZeroGpuQuota, admitQueueJobsByQuota } from "../src/lib/core.js";
+import { parseSpaceInput, parseSpaceConfig, taskFromEndpoints, classifyFailure, holdFor, normalizeOutputs, normalizeHost, normalizeGradioVersion, normalizeSpaceFramework, nextQueueBatch, normalizeZeroGpuQuota, admitQueueJobsByQuota, limitQueueBatchWithoutQuota } from "../src/lib/core.js";
 
 test("parses accepted Space identifiers and rejects arbitrary hosts", () => {
   assert.deepEqual(parseSpaceInput("owner/space-name"), { id: "owner/space-name", host: null });
@@ -171,4 +171,16 @@ test("quota admission reserves only jobs that fit the remaining GPU-seconds and 
   ], { remaining: 75 });
   assert.deepEqual(custom.admitted.map((job) => job.id), ["short-1", "short-2"]);
   assert.equal(custom.held[0].job.id, "long");
+});
+
+
+test("unknown ZeroGPU quota limits new submissions to one while preserving remote events", () => {
+  const jobs = [
+    { id: "already-submitted", remoteEventId: "evt-1" },
+    { id: "fresh-1" },
+    { id: "fresh-2" },
+    { id: "fresh-3" }
+  ];
+  assert.deepEqual(limitQueueBatchWithoutQuota(jobs).map((job) => job.id), ["already-submitted", "fresh-1"]);
+  assert.deepEqual(limitQueueBatchWithoutQuota([{ id: "remote", remoteEventId: "evt-2" }]).map((job) => job.id), ["remote"]);
 });
