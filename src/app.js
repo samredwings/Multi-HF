@@ -244,7 +244,7 @@ function renderSpaceUi(model) {
     ${privateNote}
     <div class="panel space-ui-panel">
       <div class="panel-head">
-        <div><h2>${escapeHtml(model.title || model.ref || host)}</h2><div class="subtext">${escapeHtml(host)} · ${version ? "Gradio " + escapeHtml(version) : "Gradio version unknown"}</div></div>
+        <div><h2>${escapeHtml(model.title || model.ref || host)}</h2><div class="subtext">${escapeHtml(host)} · ${version ? "Gradio " + escapeHtml(version) : escapeHtml((model.framework || "unknown").toUpperCase() + " hosted UI")}</div></div>
         <span class="badge running">${currentSpaceMode === "native" ? "NATIVE GRADIO UI" : "HOSTED SPACE UI"}</span>
       </div>
       <div id="space-ui-mount" class="space-ui-mount"></div>
