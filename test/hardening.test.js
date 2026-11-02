@@ -87,3 +87,19 @@ test("running jobs with a remote Gradio event recover without losing the event i
   assert.equal(recovered[1].status, "paused");
   assert.doesNotMatch(recovered[1].error, /event ID/i);
 });
+
+
+test("workspace import preserves per-job and profile GPU reservation estimates", () => {
+  const imported = sanitizeWorkspace({
+    models: [model],
+    profiles: [{ id: "p1", name: "profile", modelId: "a/b", apiName: "generate", values: {}, reservationSeconds: 45 }],
+    jobs: [{ id: "j1", modelId: "a/b", apiName: "generate", status: "ready", values: {}, reservationSeconds: 30 }],
+    accounts: []
+  });
+  assert.equal(imported.profiles[0].reservationSeconds, 45);
+  assert.equal(imported.jobs[0].reservationSeconds, 30);
+  const defaults = sanitizeWorkspace({
+    models: [model], profiles: [], jobs: [{ id: "j2", modelId: "a/b", apiName: "generate", status: "ready" }], accounts: []
+  });
+  assert.equal(defaults.jobs[0].reservationSeconds, 60);
+});
