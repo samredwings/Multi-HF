@@ -839,6 +839,7 @@ async function uploadFile(file, host, apiPrefix, headers, signal) {
   throw lastError || new Error("Could not upload file input.");
 }
 async function prepareGradioJob(job, model, endpoint, headers, signal) {
+  if (job.remoteEventId) return { job, model, endpoint, headers, prefix: model.apiPrefix || "/gradio_api", api: encodeURIComponent(endpoint.apiName), sessionHash: Math.random().toString(36).slice(2, 12) };
   if (/^load_example(?:_(?:input|output))?(?:_\d+)?$/i.test(endpoint.apiName)) {
     throw new Error("This Space endpoint only loads a Gradio example; choose its inference endpoint.");
   }
@@ -964,68 +965,247 @@ async function waitUnlessHalted(ms) {
 }
 async function runQueue() {
   if (queueBusy) return;
-  queueHalted = false; queueBusy = true; clearNotice(); render();
+  queueHalted = false;
+  queueBusy = true;
+  clearNotice();
+  const controller = new AbortController();
+  const jobTimers = new Map();
+  currentAbort = controller;
+
+  function failJob(job, error, tokenSent = false) {
+    const cancelled = controller.signal.aborted || isAbortError(error) && controller.signal.aborted;
+    const message = error?.message || String(error);
+    const kind = cancelled ? "cancelled" : classifyFailure(error?.status, message);
+    const until = holdFor(kind, message, error?.resetAt || null);
+    job.error = "[" + kind.toUpperCase() + "] " + (cancelled ? "Cancelled locally; the Space may still finish an already-submitted event." : message) +
+      " (endpoint /" + job.apiName + ", token " + (tokenSent ? "sent" : "not sent") + ")";
+    job.updatedAt = Date.now();
+    job.phase = "";
+    if (cancelled) {
+      job.status = job.remoteEventId ? "paused" : "paused";
+      queueHalted = true;
+    } else if (error?.submissionUncertain) {
+      // Never automatically re-submit a POST whose acceptance is unknown.
+      job.status = "paused";
+      queueHalted = true;
+      showNotice("The Space may have accepted a request but the browser did not receive its event ID. Check the Space queue before starting a fresh run.", "error");
+    } else if (kind === "quota") {
+      job.status = "paused";
+      job.quotaResetAt = until;
+      queueHalted = true;
+      showNotice("ZeroGPU or Space quota is exhausted. The submitted batch is being allowed to finish; remaining jobs are paused.", "error");
+    } else if (kind === "auth") {
+      job.status = "paused";
+      queueHalted = true;
+      showNotice("Authentication failed. Check the selected account and retry after reconnecting it.", "error");
+    } else if ((kind === "waking" || kind === "transient") && (job.attempts || 0) < MAX_AUTO_RETRIES) {
+      job.attempts = (job.attempts || 0) + 1;
+      job.status = "retry";
+      job.phase = job.remoteEventId ? "Reconnecting to submitted event" : "Will retry submission";
+      job.error += " — automatic retry " + job.attempts + "/" + MAX_AUTO_RETRIES + " will reuse the same event when one exists.";
+    } else if (kind === "waking" || kind === "transient") {
+      job.status = "paused";
+      queueHalted = true;
+      showNotice("The Space could not complete this job after bounded retries. It is paused for a manual decision.", "error");
+    } else {
+      job.status = "failed";
+      if (kind === "policy") showNotice("The Space refused the request under its policy/safety rules. Review the prompt before retrying.", "error");
+    }
+    saveState();
+    return (job.status === "retry") ? Math.min(30000, 5000 * (3 ** Math.max(0, (job.attempts || 1) - 1))) : 0;
+  }
+
   try {
     while (!queueHalted) {
-      const job = state.jobs.find((item) => ["ready", "retry"].includes(item.status));
-      if (!job) break;
-      const model = getModel(job.modelId); const endpoint = endpointFor(model, job.apiName, false);
-      if (!model || !endpoint) { job.status = "failed"; job.error = `Saved Space endpoint /${job.apiName} is no longer available. Refresh the Space schema and clone this job using a generation endpoint.`; job.updatedAt = Date.now(); saveState(); continue; }
-      const host = normalizeHost(model.host);
-      if (!host) { job.status = "failed"; job.error = "Saved Space host is not a valid *.hf.space address. Rediscover the Space and clone the job."; job.updatedAt = Date.now(); saveState(); continue; }
-      if (!jobFiles.has(job.id) && (job.files || []).length) {
-        const missing = (job.files || []).some((key) => job.values?.[key]?.name);
-        if (missing) { job.status = "paused"; job.error = "Local file inputs are no longer in memory. Clone this job and reattach files before retrying."; job.updatedAt = Date.now(); saveState(); continue; }
-      }
-      if (job.accountId && (!accountTokens.has(job.accountId) || !getAccount(job.accountId)?.enabled)) {
-        job.status = "paused"; job.error = "The selected account is not connected in this browser session. Connect it and retry this job."; job.updatedAt = Date.now(); saveState(); continue;
-      }
-      job.status = "running"; job.error = ""; job.progress = 0; job.startedAt = Date.now(); job.updatedAt = Date.now(); saveState(); render();
-      let tokenSent = false;
-      currentAbort = new AbortController();
-      const timer = withTimeout(GEN_TIMEOUT_MS, currentAbort.signal);
-      try {
-        const headers = authHeaders(job.accountId, host, model.private === true || model.sendToken === true); tokenSent = Boolean(headers.Authorization);
-        const raw = await callGradio({ ...model, host }, endpoint, job.values || {}, job, headers, timer.signal);
-        job.result = normalizeOutputs(raw, "Output", host);
-        job.status = "done"; job.error = ""; job.attempts = 0; job.finishedAt = Date.now(); job.updatedAt = Date.now(); job.progress = 1; saveState(); ping(`Completed: ${job.name || model.title}`);
-      } catch (error) {
-        const cancelled = currentAbort.signal.aborted;
-        const timedOut = !cancelled && isAbortError(error);
-        const message = timedOut ? `Request timed out after ${Math.round(GEN_TIMEOUT_MS / 60000)} minutes.` : (error.message || String(error));
-        const kind = cancelled ? "cancelled" : classifyFailure(error.status, message);
-        const until = holdFor(kind, message, error?.resetAt || null);
-        job.error = `[${kind.toUpperCase()}] ${cancelled ? "Cancelled by you. Retry when ready." : message} (endpoint /${job.apiName}, token ${tokenSent ? "sent" : "not sent"})`; job.updatedAt = Date.now();
-        if (cancelled) {
-          job.status = "paused"; queueHalted = true;
-        } else if (kind === "quota") {
-          job.status = "paused"; job.quotaResetAt = until; queueHalted = true;
-          showNotice("Quota/resource exhaustion detected. The job and queue are paused. No reset time was guessed and no other account was selected automatically.", "error");
-        } else if ((kind === "waking" || kind === "transient") && (job.attempts || 0) < MAX_AUTO_RETRIES && !queueHalted) {
-          // Bounded retry on the same Space and account: no rotation, no limit evasion.
-          const delay = Math.min(3 * 60 * 1000, until ? Math.max(0, until - Date.now()) : 5000 * 3 ** (job.attempts || 0));
-          job.attempts = (job.attempts || 0) + 1; job.status = "retry";
-          job.error += ` — automatic retry ${job.attempts}/${MAX_AUTO_RETRIES} in ${Math.ceil(delay / 1000)}s.`;
-          saveState(); render();
-          await waitUnlessHalted(delay);
-          continue;
-        } else if (kind === "waking" || kind === "transient") {
-          job.status = "paused"; queueHalted = true;
-          showNotice(`${kind === "waking" ? "The Space appears to be waking or loading." : "A transient/network error interrupted this job."} Automatic retries are used up; it is paused for a manual retry.`, "error");
-        } else if (kind === "auth") {
-          job.status = "paused"; queueHalted = true;
-          showNotice("Authentication failed. Check the selected account token and retry manually; account switching is not automatic.", "error");
-        } else {
+      const batch = nextQueueBatch(state.jobs);
+      if (!batch.length) break;
+      const model = getModel(batch[0].modelId);
+      const host = normalizeHost(model?.host);
+      if (!model || !host) {
+        for (const job of batch) {
           job.status = "failed";
-          if (kind === "policy") showNotice("The Space refused the request under its policy/safety rules. Review the prompt and the Space's own terms before retrying.", "error");
+          job.error = "The saved Space or host is no longer available. Rediscover it and clone this job.";
+          job.updatedAt = Date.now();
         }
         saveState();
-      } finally { timer.done(); currentAbort = null; }
+        render();
+        continue;
+      }
+
+      if (/zero(?:[-\s]?gpu|[-\s]?(?:a10g|t4|l4|a100))/i.test(String(model.hardware || "")) && batch[0].accountId && accountTokens.has(batch[0].accountId)) {
+        const quota = await refreshZeroGpuQuota(batch[0].accountId, true);
+        if (quota && quota.remaining <= 0) {
+          for (const job of batch) {
+            job.status = "paused";
+            job.phase = "";
+            job.error = "The selected account has no ZeroGPU GPU-seconds remaining. Refresh the quota after its reset, then retry.";
+            job.updatedAt = Date.now();
+          }
+          queueHalted = true;
+          saveState();
+          showNotice("No ZeroGPU time remains on the selected account. No generation request was submitted.", "error");
+          break;
+        }
+      }
+
+      const entries = [];
+      for (const job of batch) {
+        const endpoint = endpointFor(model, job.apiName, false);
+        if (!endpoint) {
+          job.status = "failed";
+          job.phase = "";
+          job.error = "Saved Space endpoint /" + job.apiName + " is no longer available. Refresh the Space schema and clone this job.";
+          job.updatedAt = Date.now();
+          continue;
+        }
+        if (job.accountId && (!accountTokens.has(job.accountId) || !getAccount(job.accountId)?.enabled)) {
+          job.status = "paused";
+          job.phase = "";
+          job.error = "The selected account is not connected in this browser session. Connect it and retry this job.";
+          job.updatedAt = Date.now();
+          queueHalted = true;
+          continue;
+        }
+        const timer = withTimeout(GEN_TIMEOUT_MS, controller.signal);
+        jobTimers.set(job.id, timer);
+        job.status = "running";
+        job.phase = job.remoteEventId ? "Reconnecting to submitted event" : "Preparing uploads";
+        job.error = "";
+        job.progress = 0;
+        job.startedAt = job.startedAt || Date.now();
+        job.updatedAt = Date.now();
+        const headers = authHeaders(job.accountId, host, model.private === true || model.sendToken === true);
+        entries.push({ job, endpoint, timer, headers, tokenSent: Boolean(headers.Authorization) });
+      }
+      saveState();
       render();
-      if (queueHalted) break;
+      if (queueHalted) {
+        for (const entry of entries) {
+          entry.job.status = "ready";
+          entry.job.phase = "";
+          entry.timer.done();
+          jobTimers.delete(entry.job.id);
+        }
+        saveState();
+        break;
+      }
+      if (!entries.length) continue;
+
+      // Upload all user-provided images/files before any inference request starts.
+      let uploadCursor = 0;
+      const preparedResults = new Array(entries.length);
+      const worker = async () => {
+        while (uploadCursor < entries.length) {
+          const index = uploadCursor++;
+          const entry = entries[index];
+          try {
+            const prepared = await prepareGradioJob(entry.job, { ...model, host }, entry.endpoint, entry.headers, entry.timer.signal);
+            entry.job.phase = entry.job.remoteEventId ? "Ready to resume remote event" : "Uploads prepared";
+            entry.job.updatedAt = Date.now();
+            preparedResults[index] = { ...entry, prepared };
+          } catch (error) {
+            const retryDelay = failJob(entry.job, error, entry.tokenSent);
+            preparedResults[index] = { ...entry, error, retryDelay };
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(3, entries.length) }, () => worker()));
+      saveState();
+      render();
+
+      // POSTs return event IDs quickly; the Space's own queue handles actual GPU execution.
+      const submissions = [];
+      for (const item of preparedResults) {
+        if (!item || item.error) continue;
+        if (queueHalted || controller.signal.aborted) {
+          item.job.status = "ready";
+          item.job.phase = "";
+          item.job.updatedAt = Date.now();
+          continue;
+        }
+        try {
+          item.job.phase = "Submitting to Space queue";
+          item.job.updatedAt = Date.now();
+          render();
+          const submitted = await submitGradioJob(item.prepared, item.timer.signal);
+          if (submitted.eventId) {
+            item.job.remoteEventId = submitted.eventId;
+            item.job.phase = "Submitted · waiting for Space GPU queue";
+          } else {
+            item.job.phase = "Legacy synchronous endpoint";
+          }
+          item.job.updatedAt = Date.now();
+          saveState();
+          submissions.push({ ...item, submission: submitted });
+        } catch (error) {
+          item.retryDelay = failJob(item.job, error, item.tokenSent);
+        }
+      }
+      saveState();
+
+      // Attach all event streams concurrently; do not wait for job 1's image before monitoring job 2.
+      await Promise.all(submissions.map(async (item) => {
+        try {
+          const raw = await waitForGradioJob(item.submission, item.timer.signal);
+          item.job.result = normalizeOutputs(raw, "Output", host);
+          item.job.status = "done";
+          item.job.error = "";
+          item.job.phase = "Complete";
+          item.job.remoteEventId = "";
+          item.job.attempts = 0;
+          item.job.finishedAt = Date.now();
+          item.job.updatedAt = Date.now();
+          item.job.progress = 1;
+          await deleteJobAttachments(item.job.id);
+          saveState();
+          ping("Completed: " + (item.job.name || model.title));
+        } catch (error) {
+          item.retryDelay = failJob(item.job, error, item.tokenSent);
+        } finally {
+          item.timer.done();
+          jobTimers.delete(item.job.id);
+        }
+      }));
+
+      // Jobs that were prepared but not accepted remain safely staged for the next run.
+      for (const item of preparedResults) {
+        if (item && !item.error && !submissions.some((submitted) => submitted.job.id === item.job.id) && item.job.status === "running") {
+          item.job.status = "ready";
+          item.job.phase = "";
+          item.job.updatedAt = Date.now();
+          item.timer.done();
+          jobTimers.delete(item.job.id);
+        }
+      }
+      for (const item of preparedResults) {
+        if (item?.error) {
+          item.timer.done();
+          jobTimers.delete(item.job.id);
+        }
+      }
+      saveState();
+      render();
+
+      if (/zero(?:[-\s]?gpu|[-\s]?(?:a10g|t4|l4|a100))/i.test(String(model.hardware || "")) && batch[0].accountId) {
+        await refreshZeroGpuQuota(batch[0].accountId, true);
+      }
+      if (!queueHalted) {
+        const retryJobs = state.jobs.filter((job) => ["ready", "retry"].includes(job.status));
+        if (retryJobs.some((job) => job.status === "retry")) {
+          const delay = Math.max(0, ...retryJobs.filter((job) => job.status === "retry").map((job) => Math.min(30000, 5000 * (3 ** Math.max(0, (job.attempts || 1) - 1)))));
+          if (delay) await waitUnlessHalted(delay);
+        }
+      }
     }
+  } catch (error) {
+    showNotice("Queue manager stopped: " + (error?.message || String(error)), "error");
   } finally {
-    queueBusy = false; render();
+    for (const timer of jobTimers.values()) timer.done();
+    jobTimers.clear();
+    currentAbort = null;
+    queueBusy = false;
+    saveState();
+    render();
     if (!queueHalted) ping("Queue run finished.");
   }
 }
