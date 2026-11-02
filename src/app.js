@@ -638,7 +638,7 @@ function openNewJob(modelId = null, profile = null) {
   const profiles = state.profiles.filter((p) => p.modelId === model.id);
   const accounts = [{ id: "", label: "Public / no token" }, ...connectedAccounts().filter((a) => a.enabled).map((a) => ({ id: a.id, label: a.label }))];
   showDialog(`${dialogHeader("Create generation job", "Choose a Space endpoint, set its parameters, and add the job to the persistent queue.")}
-    <form id="job-form"><div class="field-grid"><div class="field"><label for="job-name">Job name</label><input id="job-name" name="name" maxlength="100" value="${escapeHtml(profile?.name || "")}" placeholder="e.g. cinematic city loop"></div><div class="field"><label for="job-model">Space</label><select id="job-model" name="modelId">${state.models.map((m) => `<option value="${escapeHtml(m.id)}" ${m.id === model.id ? "selected" : ""}>${escapeHtml(m.title)}</option>`).join("")}</select></div><div class="field"><label for="job-api">API endpoint</label><select id="job-api" name="apiName">${model.endpoints.map((ep) => `<option value="${escapeHtml(ep.apiName)}" ${ep.apiName === endpoint.apiName ? "selected" : ""}>/${escapeHtml(ep.apiName)}</option>`).join("")}</select></div><div class="field"><label for="job-account">Account for this job</label><select id="job-account" name="accountId">${accounts.map((a) => `<option value="${escapeHtml(a.id)}" ${String(profile?.accountId || model.accountId || state.settings.lastAccountId || "") === a.id ? "selected" : ""}>${escapeHtml(a.label)}</option>`).join("")}</select><small>Account selection is explicit; tokens are not silently rotated.</small></div></div><div class="section-head"><div><h2>Generation parameters</h2><p>Inputs are created from the live Gradio schema.</p></div></div><div class="field-grid" id="job-fields"></div><div class="field full" style="margin-top:16px"><label class="inline-actions"><input id="job-save-profile" type="checkbox" ${profile ? "checked" : ""}><span>Save these settings as a reusable profile</span></label></div><div class="field ${profile ? "" : "hidden"}" id="job-profile-name-wrap"><label for="job-profile-name">Profile name</label><input id="job-profile-name" value="${escapeHtml(profile?.name || "")}" placeholder="Reusable profile name"></div><div class="form-actions"><button class="button" type="button" data-close>Cancel</button><button class="button button-primary" type="submit">＋ Add to queue</button></div></form>`);
+    <form id="job-form"><div class="field-grid"><div class="field"><label for="job-name">Job name</label><input id="job-name" name="name" maxlength="100" value="${escapeHtml(profile?.name || "")}" placeholder="e.g. cinematic city loop"></div><div class="field"><label for="job-runs">Repeat jobs</label><input id="job-runs" name="runs" type="number" min="1" max="10" step="1" value="1"><small>Stage up to 10 identical runs in one batch. Set the model seed to random when supported for different outputs.</small></div><div class="field"><label for="job-model">Space</label><select id="job-model" name="modelId">${state.models.map((m) => `<option value="${escapeHtml(m.id)}" ${m.id === model.id ? "selected" : ""}>${escapeHtml(m.title)}</option>`).join("")}</select></div><div class="field"><label for="job-api">API endpoint</label><select id="job-api" name="apiName">${model.endpoints.map((ep) => `<option value="${escapeHtml(ep.apiName)}" ${ep.apiName === endpoint.apiName ? "selected" : ""}>/${escapeHtml(ep.apiName)}</option>`).join("")}</select></div><div class="field"><label for="job-account">Account for this job</label><select id="job-account" name="accountId">${accounts.map((a) => `<option value="${escapeHtml(a.id)}" ${String(profile?.accountId || model.accountId || state.settings.lastAccountId || "") === a.id ? "selected" : ""}>${escapeHtml(a.label)}</option>`).join("")}</select><small>Account selection is explicit; tokens are not silently rotated.</small></div></div><div class="section-head"><div><h2>Generation parameters</h2><p>Inputs are created from the live Gradio schema.</p></div></div><div class="field-grid" id="job-fields"></div><div class="field full" style="margin-top:16px"><label class="inline-actions"><input id="job-save-profile" type="checkbox" ${profile ? "checked" : ""}><span>Save these settings as a reusable profile</span></label></div><div class="field ${profile ? "" : "hidden"}" id="job-profile-name-wrap"><label for="job-profile-name">Profile name</label><input id="job-profile-name" value="${escapeHtml(profile?.name || "")}" placeholder="Reusable profile name"></div><div class="form-actions"><button class="button" type="button" data-close>Cancel</button><button class="button button-primary" type="submit">＋ Add to queue</button></div></form>`);
   const form = document.querySelector("#job-form");
   const modelSelect = document.querySelector("#job-model"); const apiSelect = document.querySelector("#job-api");
   function refillEndpoints(selectedApi = "") {
@@ -657,26 +657,88 @@ function openNewJob(modelId = null, profile = null) {
   apiSelect.addEventListener("change", refillFields);
   refillFields();
   document.querySelector("#job-save-profile").addEventListener("change", (event) => { document.querySelector("#job-profile-name-wrap").classList.toggle("hidden", !event.target.checked); });
-  form.addEventListener("submit", (event) => {
+  form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const chosen = getModel(modelSelect.value); const ep = endpointFor(chosen, apiSelect.value);
-    if (!chosen || !ep) { dialogError("Select a valid Space endpoint."); return; }
-    const values = collectValues(form, ep, files);
-    const name = String(new FormData(form).get("name") || values.prompt || ep.apiName).trim();
-    const jobId = safeId("job");
-    const job = { id: jobId, name, modelId: chosen.id, apiName: ep.apiName, accountId: String(new FormData(form).get("accountId") || ""), values, files: [...files.keys()], status: "ready", error: "", result: [], createdAt: Date.now(), updatedAt: Date.now() };
-    state.jobs.push(job);
-    jobFiles.set(jobId, files);
-    if (document.querySelector("#job-save-profile").checked) {
-      const profileName = String(document.querySelector("#job-profile-name").value || name).trim();
-      if (profileName) {
-        const existing = state.profiles.find((p) => p.name === profileName && p.modelId === chosen.id);
-        const profileRecord = { id: existing?.id || safeId("profile"), name: profileName, modelId: chosen.id, apiName: ep.apiName, values: JSON.parse(JSON.stringify(values)), accountId: job.accountId, createdAt: existing?.createdAt || Date.now(), updatedAt: Date.now() };
-        if (existing) Object.assign(existing, profileRecord); else state.profiles.push(profileRecord);
+    const submit = form.querySelector('[type="submit"]');
+    submit.disabled = true;
+    submit.textContent = "Saving attachments and staging jobs…";
+    const savedAttachmentJobs = [];
+    try {
+      const chosen = getModel(modelSelect.value);
+      const ep = endpointFor(chosen, apiSelect.value);
+      if (!chosen || !ep) throw new Error("Select a valid Space endpoint.");
+      const fallbackValues = profile && profile.modelId === chosen.id && profile.apiName === ep.apiName ? (profile.values || {}) : {};
+      const values = collectValues(form, ep, files, fallbackValues);
+      if (profile?.sourceJobId && chosen.id === profile.modelId && ep.apiName === profile.apiName) {
+        const originalFiles = await loadJobAttachments(profile.sourceJobId);
+        for (const field of ep.fields.filter(isFileField)) {
+          if (!files.has(field.key) && originalFiles.has(field.key)) files.set(field.key, originalFiles.get(field.key));
+          if (!files.has(field.key) && values[field.key] && (values[field.key].name || (Array.isArray(values[field.key]) && values[field.key].length))) {
+            throw new Error('The original attachment for "' + (field.label || field.key) + '" is unavailable. Select it again before cloning this job.');
+          }
+        }
       }
+      const formData = new FormData(form);
+      const runCount = Math.max(1, Math.min(10, Number(formData.get("runs")) || 1));
+      const baseName = String(formData.get("name") || values.prompt || ep.apiName).trim();
+      const accountId = String(formData.get("accountId") || "");
+      const batchId = safeId("batch");
+      const jobsToAdd = [];
+      for (let index = 0; index < runCount; index += 1) {
+        const jobId = safeId("job");
+        const jobFileMap = new Map([...files.entries()].map(([key, value]) => [key, Array.isArray(value) ? value.slice() : value]));
+        await persistJobAttachments(jobId, jobFileMap);
+        savedAttachmentJobs.push(jobId);
+        jobFiles.set(jobId, jobFileMap);
+        jobsToAdd.push({
+          id: jobId,
+          batchId,
+          name: runCount > 1 ? baseName + " #" + (index + 1) : baseName,
+          modelId: chosen.id,
+          apiName: ep.apiName,
+          accountId,
+          values: JSON.parse(JSON.stringify(values)),
+          files: [...jobFileMap.keys()],
+          status: "ready",
+          error: "",
+          result: [],
+          createdAt: Date.now() + index,
+          updatedAt: Date.now(),
+        });
+      }
+      state.jobs.push(...jobsToAdd);
+      if (document.querySelector("#job-save-profile").checked) {
+        const profileName = String(document.querySelector("#job-profile-name").value || baseName).trim();
+        if (profileName) {
+          const profileValues = JSON.parse(JSON.stringify(values));
+          for (const field of ep.fields.filter(isFileField)) delete profileValues[field.key];
+          const existing = state.profiles.find((item) => item.name === profileName && item.modelId === chosen.id);
+          const profileRecord = {
+            id: existing?.id || safeId("profile"),
+            name: profileName,
+            modelId: chosen.id,
+            apiName: ep.apiName,
+            values: profileValues,
+            accountId,
+            createdAt: existing?.createdAt || Date.now(),
+            updatedAt: Date.now(),
+          };
+          if (existing) Object.assign(existing, profileRecord);
+          else state.profiles.push(profileRecord);
+        }
+      }
+      saveState();
+      dialog.close();
+      currentTab = "queue";
+      render();
+      ping(runCount === 1 ? "Job added to queue with saved attachments." : runCount + " jobs staged with their attachments.");
+    } catch (error) {
+      for (const id of savedAttachmentJobs) await deleteJobAttachments(id);
+      submit.disabled = false;
+      submit.textContent = "＋ Add to queue";
+      dialogError(error.message || "Could not stage this generation job.");
     }
-    saveState(); dialog.close(); currentTab = "queue"; render(); ping("Job added to queue.");
-  });
+  });;
 }
 function openNewProfile(existing = null) {
   if (existing) { openNewJob(existing.modelId, existing); return; }
