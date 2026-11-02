@@ -270,14 +270,14 @@ export function normalizeZeroGpuQuota(raw) {
 // Token policy: a token may go to the Hub API, and to a *.hf.space host only
 // when the Hub reported that Space as private. Anyone can publish a public
 // Space, so public hosts must never receive a user's token.
-export function tokenHeaders(token, url, { privateSpace = false } = {}) {
+export function tokenHeaders(token, url, { privateSpace = false, allowPublicSpace = false } = {}) {
   if (!token) return {};
   let target;
   try { target = new URL(url); } catch { return {}; }
   if (target.protocol !== "https:" || target.username || target.password || target.port) return {};
   const host = target.hostname.toLowerCase();
   if (host === "huggingface.co" || host === "www.huggingface.co") return { Authorization: `Bearer ${token}` };
-  if (privateSpace && /^[a-z0-9-]+\.hf\.space$/.test(host)) return { Authorization: `Bearer ${token}` };
+  if ((privateSpace || allowPublicSpace) && /^[a-z0-9-]+\.hf\.space$/.test(host)) return { Authorization: `Bearer ${token}` };
   return {};
 }
 
