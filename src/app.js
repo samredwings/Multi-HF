@@ -1,5 +1,5 @@
 import {
-  parseSpaceInput, normalizeHost, parseSpaceConfig, taskFromEndpoints, classifyFailure,
+  parseSpaceInput, normalizeHost, parseSpaceConfig, normalizeGradioVersion, taskFromEndpoints, classifyFailure,
   holdFor, normalizeOutputs, safeId, tokenHeaders, persistableResult, recoverRunningJobs, sanitizeWorkspace, readGradioStream, errorMessage,
 } from "./lib/core.js";
 
@@ -16,6 +16,8 @@ const accountTokens = new Map();
 const jobFiles = new Map();
 let currentTab = "queue";
 let currentSpaceUi = null;
+let currentSpaceMode = "native";
+const gradioScriptLoads = new Map();
 let queueBusy = false;
 let queueHalted = false;
 let currentAbort = null;
@@ -153,24 +155,76 @@ function renderJobs() {
   document.querySelector("#jobs-clear")?.addEventListener("click", () => { state.jobs = state.jobs.filter((job) => job.status !== "done"); saveState(); render(); ping("Completed jobs cleared."); });
   bindJobActions();
 }
+function ensureGradioComponent(version) {
+  if (customElements.get("gradio-app")) return Promise.resolve();
+  if (gradioScriptLoads.has(version)) return gradioScriptLoads.get(version);
+  const pending = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.type = "module";
+    script.src = "https://gradio.s3-us-west-2.amazonaws.com/" + encodeURIComponent(version) + "/gradio.js";
+    script.onload = () => customElements.whenDefined("gradio-app").then(resolve, reject);
+    script.onerror = () => reject(new Error("The matching Gradio web component could not be loaded."));
+    document.head.append(script);
+  });
+  gradioScriptLoads.set(version, pending);
+  return pending;
+}
+function mountSpaceIframe(mount, model) {
+  const frame = document.createElement("iframe");
+  frame.className = "space-ui-frame";
+  frame.src = normalizeHost(model.host) + "/";
+  frame.title = "Hosted Hugging Face interface for " + (model.title || model.ref || model.host);
+  frame.loading = "eager";
+  frame.referrerPolicy = "no-referrer";
+  frame.allow = "fullscreen; clipboard-write";
+  frame.allowFullscreen = true;
+  mount.replaceChildren(frame);
+}
+async function mountNativeGradio(mount, model, version) {
+  mount.innerHTML = '<div class="space-ui-loading" role="status">Loading the Space\'s native Gradio interface…</div>';
+  try {
+    await ensureGradioComponent(version);
+    if (!mount.isConnected || currentSpaceUi !== model.id || currentSpaceMode !== "native") return;
+    const app = document.createElement("gradio-app");
+    app.setAttribute("src", normalizeHost(model.host) + "/");
+    app.setAttribute("initial-height", "720px");
+    app.style.display = "block";
+    app.style.width = "100%";
+    app.style.minHeight = "680px";
+    mount.replaceChildren(app);
+  } catch (error) {
+    if (!mount.isConnected || currentSpaceUi !== model.id) return;
+    mountSpaceIframe(mount, model);
+    const note = document.createElement("p");
+    note.className = "help space-ui-fallback-note";
+    note.textContent = "Native Gradio embedding failed (" + error.message + "). Showing the hosted page in an iframe instead.";
+    mount.after(note);
+  }
+}
 function renderSpaceUi(model) {
   const host = normalizeHost(model?.host);
   if (!host) {
-    view.innerHTML = `<div class="panel"><div class="empty"><div class="empty-mark">!</div><strong>This Space has no valid live UI address</strong><p>Refresh the Space schema, then try again.</p><button class="button button-primary" id="space-ui-back">Back to workspace</button></div></div>`;
+    view.innerHTML = '<div class="panel"><div class="empty"><div class="empty-mark">!</div><strong>This Space has no valid live UI address</strong><p>Refresh the Space schema, then try again.</p><button class="button button-primary" id="space-ui-back">Back to workspace</button></div></div>';
     document.querySelector("#space-ui-back")?.addEventListener("click", () => { currentSpaceUi = null; currentTab = "models"; render(); });
     return;
   }
+  const version = normalizeGradioVersion(model.gradioVersion);
+  if (!version) currentSpaceMode = "iframe";
   const standaloneUrl = model.ref
-    ? `https://huggingface.co/spaces/${model.ref.split("/").map(encodeURIComponent).join("/")}`
+    ? "https://huggingface.co/spaces/" + model.ref.split("/").map(encodeURIComponent).join("/")
     : host;
   const privateNote = model.private
-    ? `<div class="notice error space-ui-notice">This Space is marked private. The embedded UI may require a Hugging Face sign-in and browser permissions. Multi-HF does not inject its session token into this frame; use the API form for authenticated queued jobs.</div>`
+    ? '<div class="notice error space-ui-notice">This Space is marked private. Native embedding may require a Hugging Face sign-in. Multi-HF does not inject its session token into the hosted UI; use authenticated API jobs where supported.</div>'
     : "";
+  const modeButton = version
+    ? '<button class="button button-sm" id="space-ui-toggle">' + (currentSpaceMode === "native" ? "Use iframe fallback" : "Use native Gradio UI") + '</button>'
+    : '<span class="badge warning">Gradio version not detected · iframe mode</span>';
   view.innerHTML = `
     <div class="section-head space-ui-header">
-      <div><h2>Live model interface</h2><p>The selected Space's own UI is loaded below. Each Space keeps its own controls, layout, examples, and workflow.</p></div>
+      <div><h2>Model interface</h2><p>Multi-HF loads the Space's own Gradio interface. The selected runtime version is used when available.</p></div>
       <div class="inline-actions">
         <button class="button button-sm" id="space-ui-back">← Workspace</button>
+        ${modeButton}
         <a class="button button-sm" href="${escapeHtml(standaloneUrl)}" target="_blank" rel="noopener noreferrer">Open standalone ↗</a>
         <button class="button button-primary button-sm" id="space-ui-job">Create queued job</button>
       </div>
@@ -178,13 +232,17 @@ function renderSpaceUi(model) {
     ${privateNote}
     <div class="panel space-ui-panel">
       <div class="panel-head">
-        <div><h2>${escapeHtml(model.title || model.ref || host)}</h2><div class="subtext">${escapeHtml(host)}</div></div>
-        <span class="badge running">LIVE SPACE UI</span>
+        <div><h2>${escapeHtml(model.title || model.ref || host)}</h2><div class="subtext">${escapeHtml(host)} · ${version ? "Gradio " + escapeHtml(version) : "Gradio version unknown"}</div></div>
+        <span class="badge running">${currentSpaceMode === "native" ? "NATIVE GRADIO UI" : "HOSTED SPACE UI"}</span>
       </div>
-      <iframe class="space-ui-frame" src="${escapeHtml(host + "/")}" title="Live Hugging Face interface for ${escapeHtml(model.title || model.ref || host)}" loading="eager" referrerpolicy="no-referrer" allow="fullscreen; clipboard-write" allowfullscreen></iframe>
+      <div id="space-ui-mount" class="space-ui-mount"></div>
     </div>
-    <p class="help space-ui-help">This is the model author's hosted interface, not a recreated generic form. Its inputs and results stay inside the Space and do not automatically populate Multi-HF profiles or the batch queue. Use “Create queued job” for batch runs. Some Spaces disable embedding; “Open standalone” is the fallback.</p>`;
+    <p class="help space-ui-help">The hosted interface preserves the author's own layout and controls. Use the API job form when you want to save parameters as profiles or add runs to the batch queue. Private-space browser authentication and Spaces that block embedding remain subject to Hugging Face permissions.</p>`;
+  const mount = document.querySelector("#space-ui-mount");
+  if (currentSpaceMode === "native" && version) mountNativeGradio(mount, model, version);
+  else mountSpaceIframe(mount, model);
   document.querySelector("#space-ui-back")?.addEventListener("click", () => { currentSpaceUi = null; currentTab = "models"; render(); });
+  document.querySelector("#space-ui-toggle")?.addEventListener("click", () => { currentSpaceMode = currentSpaceMode === "native" ? "iframe" : "native"; renderSpaceUi(model); });
   document.querySelector("#space-ui-job")?.addEventListener("click", () => { currentSpaceUi = null; currentTab = "models"; render(); openNewJob(model.id); });
 }
 function renderModels() {
@@ -333,6 +391,7 @@ async function discoverSpace(modelId = null, options = {}) {
     id, kind: "space", ref: resolvedId || prior?.ref || "", host,
     title: name || schema.title || apiData?.cardData?.title || resolvedId || host,
     task: taskFromEndpoints(schema.endpoints), apiPrefix: schema.apiPrefix,
+    gradioVersion: normalizeGradioVersion(schema.gradioVersion, apiData?.sdk_version, apiData?.cardData?.sdk_version),
     endpoints: schema.endpoints, activeApi: schema.endpoints[0]?.apiName || "", accountId, private: apiData?.private === true, sendToken: options.sendToken ?? prior?.sendToken === true,
     hardware: apiData?.runtime?.hardware?.current || apiData?.runtime?.hardware || "Unknown", fetchedAt: Date.now(), note: name,
   };
