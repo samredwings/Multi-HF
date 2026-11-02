@@ -300,10 +300,12 @@ export function sanitizeWorkspace(data) {
     const host = normalizeHost(m.host);
     if (!host) continue;
     const endpoints = (Array.isArray(m.endpoints) ? m.endpoints : []).map(cleanEndpoint).filter(Boolean);
-    if (!endpoints.length) continue;
+    const framework = normalizeSpaceFramework(m.framework);
+    if (!endpoints.length && framework === "unknown") continue;
     models.push({
       id: text(m.id, 200), kind: "space", host, endpoints,
       gradioVersion: normalizeGradioVersion(m.gradioVersion),
+      framework,
       ref: /^[\w.-]+\/[\w.-]+$/.test(m.ref ?? "") ? m.ref : "",
       title: text(m.title, 200) || host, note: text(m.note, 200),
       task: ["image", "video", "other"].includes(m.task) ? m.task : "other",
