@@ -223,7 +223,7 @@ function statusBadge(status) {
 }
 function renderQuotaPanel() {
   const accounts = connectedAccounts();
-  const preferred = quotaAccountId || state.settings.lastAccountId || accounts[0]?.id || "";
+  const preferred = (accounts.some((account) => account.id === quotaAccountId) ? quotaAccountId : "") || (accounts.some((account) => account.id === state.settings.lastAccountId) ? state.settings.lastAccountId : "") || accounts[0]?.id || "";
   const options = accounts.map((account) => `<option value="${escapeHtml(account.id)}" ${account.id === preferred ? "selected" : ""}>${escapeHtml(account.label)}</option>`).join("");
   let quotaBody = "";
   if (!accounts.length) quotaBody = '<p class="help">Connect a Hugging Face account to check its ZeroGPU allowance. The queue can still run public Spaces without a token.</p>';
@@ -234,7 +234,7 @@ function renderQuotaPanel() {
     quotaBody = `<div class="quota-metrics"><div><span class="muted">Remaining</span><strong>${formatGpuTime(quota.remaining)}</strong></div><div><span class="muted">Daily allowance</span><strong>${formatGpuTime(quota.base)}</strong></div><div><span class="muted">Paid overage used</span><strong>${formatGpuTime(quota.overquotaUsed)}</strong></div></div><div class="quota-meter"><span style="width:${pct}%"></span></div><p class="help">${quota.resetsAt ? "Quota resets " + escapeHtml(fmtDate(quota.resetsAt)) : "Reset time not reported yet"} · refreshed ${escapeHtml(timeAgo(quotaState.checkedAt))}</p>`;
   } else if (quotaState.error && quotaState.accountId === preferred) quotaBody = `<p class="help">${escapeHtml(quotaState.error)}</p>`;
   else quotaBody = '<p class="help">Check your account’s remaining ZeroGPU GPU-seconds. Requires a fine-grained token with “Billing → Read billing usage and payment method status” permission.</p>';
-  return `<div class="panel quota-panel"><div class="panel-head"><div><h2>ZeroGPU allowance</h2><div class="subtext">Live GPU-seconds for the selected Hugging Face account</div></div><div class="inline-actions">${accounts.length ? `<select id="quota-account" aria-label="Quota account">${options}</select>` : ""}<button class="button button-sm" id="quota-refresh" ${!accounts.length || quotaState.loading ? "disabled" : ""}>${quotaState.loading ? "Checking…" : "Refresh quota"}</button></div></div><div class="panel-body">${quotaBody}</div></div>`;
+  return `<div class="panel quota-panel"><div class="panel-head"><div><h2>ZeroGPU allowance</h2><div class="subtext">Live GPU-seconds for the selected Hugging Face account · GPU time, not wall-clock time</div></div><div class="inline-actions">${accounts.length ? `<select id="quota-account" aria-label="Quota account">${options}</select>` : ""}<button class="button button-sm" id="quota-refresh" ${!accounts.length || quotaState.loading ? "disabled" : ""}>${quotaState.loading ? "Checking…" : "Refresh quota"}</button></div></div><div class="panel-body">${quotaBody}</div></div>`;
 }
 function renderQueue() {
   const ready = waitingJobs().length;
@@ -783,7 +783,7 @@ function openJobDetails(jobId) {
   const model = getModel(job.modelId);
   const result = Array.isArray(job.result) ? job.result : [];
   showDialog(`${dialogHeader(job.name || "Generation job", `${model?.title || job.modelId} · /${job.apiName}`)}
-    <div class="field-grid"><div><div class="label">Status</div><p>${statusBadge(job.status)}</p></div><div><div class="label">Last updated</div><p class="card-meta">${escapeHtml(fmtDate(job.updatedAt))}</p></div><div class="field full"><label>Error / event details</label><div class="panel-body" style="border:1px solid var(--line);border-radius:8px;white-space:pre-wrap;word-break:break-word">${escapeHtml(job.error || "No error recorded.")}</div></div></div>
+    <div class="field-grid"><div><div class="label">Status</div><p>${statusBadge(job.status)}</p></div><div><div class="label">Current phase</div><p class="card-meta">${escapeHtml(job.phase || "—")}</p></div><div><div class="label">Last updated</div><p class="card-meta">${escapeHtml(fmtDate(job.updatedAt))}</p></div><div class="field full"><label>Error / event details</label><div class="panel-body" style="border:1px solid var(--line);border-radius:8px;white-space:pre-wrap;word-break:break-word">${escapeHtml(job.error || "No error recorded.")}</div></div></div>
     <div class="section-head"><div><h2>Output gallery</h2><p>${result.length} normalized output item${result.length === 1 ? "" : "s"}</p></div></div>${renderResults(result)}
     <div class="form-actions"><button class="button" type="button" data-close>Close</button>${job.status === "paused" && job.remoteEventId ? `<button class="button button-primary" id="detail-resume">Resume remote event</button>` : ""}${["failed", "paused"].includes(job.status) ? `<button class="button" id="detail-retry">Retry as new request</button>` : ""}<button class="button" id="detail-clone">Clone job</button></div>`);
   document.querySelector("#detail-resume")?.addEventListener("click", () => { if (!job.remoteEventId) return; job.status = "retry"; job.error = ""; job.phase = "Reconnecting to submitted event"; job.updatedAt = Date.now(); queueHalted = false; saveState(); dialog.close(); currentTab = "queue"; render(); runQueue(); });
@@ -1020,7 +1020,7 @@ async function runQueue() {
 
   try {
     while (!queueHalted) {
-      const batch = nextQueueBatch(state.jobs);
+      let batch = nextQueueBatch(state.jobs);
       if (!batch.length) break;
       const model = getModel(batch[0].modelId);
       const host = normalizeHost(model?.host);
@@ -1035,19 +1035,21 @@ async function runQueue() {
         continue;
       }
 
-      if (/zero(?:[-\s]?gpu|[-\s]?(?:a10g|t4|l4|a100))/i.test(String(model.hardware || "")) && batch[0].accountId && accountTokens.has(batch[0].accountId)) {
+      const freshJobs = batch.filter((job) => !job.remoteEventId);
+      if (freshJobs.length && /zero(?:[-\s]?gpu|[-\s]?(?:a10g|t4|l4|a100))/i.test(String(model.hardware || "")) && batch[0].accountId && accountTokens.has(batch[0].accountId)) {
         const quota = await refreshZeroGpuQuota(batch[0].accountId, true);
         if (quota && quota.remaining <= 0) {
-          for (const job of batch) {
+          for (const job of freshJobs) {
             job.status = "paused";
             job.phase = "";
             job.error = "The selected account has no ZeroGPU GPU-seconds remaining. Refresh the quota after its reset, then retry.";
             job.updatedAt = Date.now();
           }
-          queueHalted = true;
+          // A remote event is already submitted and consumes no new quota by resuming its result stream.
+          batch = batch.filter((job) => Boolean(job.remoteEventId));
           saveState();
-          showNotice("No ZeroGPU time remains on the selected account. No generation request was submitted.", "error");
-          break;
+          showNotice("No ZeroGPU time remains for new requests. Already-submitted remote events will still be resumed.", "error");
+          if (!batch.length) { queueHalted = true; break; }
         }
       }
 
