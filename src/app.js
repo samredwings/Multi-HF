@@ -607,45 +607,45 @@ function endpointFor(model, apiName, fallback = true) {
 }
 function inputElement(field, value, profileMode = false) {
   if (field.hidden) return "";
-  const id = \`f-\${field.key}\`;
+  const id = `f-${field.key}`;
   const label = escapeHtml(field.label || field.key);
-  const hint = field.hint ? \`<small>\${escapeHtml(field.hint)}</small>\` : "";
+  const hint = field.hint ? `<small>${escapeHtml(field.hint)}</small>` : "";
   let input = "";
-  if (field.type === "textarea") input = \`<textarea id="\${id}" data-key="\${escapeHtml(field.key)}" placeholder="\${escapeHtml(field.placeholder || "")}" rows="3">\${escapeHtml(value ?? field.defaultValue ?? "")}</textarea>\`;
+  if (field.type === "textarea") input = `<textarea id="${id}" data-key="${escapeHtml(field.key)}" placeholder="${escapeHtml(field.placeholder || "")}" rows="3">${escapeHtml(value ?? field.defaultValue ?? "")}</textarea>`;
   else if (field.type === "json") input = '<textarea id="' + id + '" data-key="' + escapeHtml(field.key) + '" rows="6" spellcheck="false">' + escapeHtml(value ?? field.defaultValue ?? "{}") + '</textarea>';
   else if (field.type === "color") input = '<input id="' + id + '" data-key="' + escapeHtml(field.key) + '" type="color" value="' + escapeHtml(value ?? field.defaultValue ?? "#000000") + '">';
   else if (["date", "time", "datetime-local"].includes(field.type)) input = '<input id="' + id + '" data-key="' + escapeHtml(field.key) + '" type="' + field.type + '" value="' + escapeHtml(value ?? field.defaultValue ?? "") + '">';
-  else if (field.type === "checkbox") input = \`<label class="inline-actions"><input id="\${id}" data-key="\${escapeHtml(field.key)}" type="checkbox" \${value === true || (value == null && field.defaultValue === true) ? "checked" : ""}> <span>\${label}</span></label>\`;
+  else if (field.type === "checkbox") input = `<label class="inline-actions"><input id="${id}" data-key="${escapeHtml(field.key)}" type="checkbox" ${value === true || (value == null && field.defaultValue === true) ? "checked" : ""}> <span>${label}</span></label>`;
   else if (field.type === "select" || field.type === "radio" || field.type === "checkboxgroup") {
     const choices = field.choices || [];
-    if (field.type === "checkboxgroup") input = choices.length ? \`<div class="choice-list">\${choices.map((choice) => \`<label class="inline-actions"><input type="checkbox" data-key="\${escapeHtml(field.key)}" data-choice="\${escapeHtml(choice.value)}" \${(Array.isArray(value) ? value : []).includes(choice.value) ? "checked" : ""}><span>\${escapeHtml(choice.label)}</span></label>\`).join("")}</div>\` : \`<input id="\${id}" data-key="\${escapeHtml(field.key)}" placeholder="Comma-separated values" value="\${escapeHtml(Array.isArray(value) ? value.join(", ") : "")}">\`;
-    else input = \`<select id="\${id}" data-key="\${escapeHtml(field.key)}">\${choices.map((choice) => \`<option value="\${escapeHtml(choice.value)}" \${(String(value ?? field.defaultValue ?? "") === choice.value) ? "selected" : ""}>\${escapeHtml(choice.label)}</option>\`).join("")}\${!choices.length ? \`<option value="\${escapeHtml(value ?? "")}">\${escapeHtml(value ?? "Select a value")}</option>\` : ""}</select>\`;
+    if (field.type === "checkboxgroup") input = choices.length ? `<div class="choice-list">${choices.map((choice) => `<label class="inline-actions"><input type="checkbox" data-key="${escapeHtml(field.key)}" data-choice="${escapeHtml(choice.value)}" ${(Array.isArray(value) ? value : []).includes(choice.value) ? "checked" : ""}><span>${escapeHtml(choice.label)}</span></label>`).join("")}</div>` : `<input id="${id}" data-key="${escapeHtml(field.key)}" placeholder="Comma-separated values" value="${escapeHtml(Array.isArray(value) ? value.join(", ") : "")}">`;
+    else input = `<select id="${id}" data-key="${escapeHtml(field.key)}">${choices.map((choice) => `<option value="${escapeHtml(choice.value)}" ${(String(value ?? field.defaultValue ?? "") === choice.value) ? "selected" : ""}>${escapeHtml(choice.label)}</option>`).join("")}${!choices.length ? `<option value="${escapeHtml(value ?? "")}">${escapeHtml(value ?? "Select a value")}</option>` : ""}</select>`;
   }
-  else if (field.type === "slider") input = \`<div><input id="\${id}" data-key="\${escapeHtml(field.key)}" type="range" min="\${field.min ?? 0}" max="\${field.max ?? 100}" step="\${field.step ?? 1}" value="\${escapeHtml(value ?? field.defaultValue ?? field.min ?? 0)}"><small id="\${id}-value">\${escapeHtml(value ?? field.defaultValue ?? field.min ?? 0)}</small></div>\`;
-  else if (field.type === "number") input = \`<input id="\${id}" data-key="\${escapeHtml(field.key)}" type="number" \${field.min != null ? \`min="\${field.min}"\` : ""} \${field.max != null ? \`max="\${field.max}"\` : ""} \${field.step != null ? \`step="\${field.step}"\` : ""} value="\${escapeHtml(value ?? field.defaultValue ?? "")}">\`;
+  else if (field.type === "slider") input = `<div><input id="${id}" data-key="${escapeHtml(field.key)}" type="range" min="${field.min ?? 0}" max="${field.max ?? 100}" step="${field.step ?? 1}" value="${escapeHtml(value ?? field.defaultValue ?? field.min ?? 0)}"><small id="${id}-value">${escapeHtml(value ?? field.defaultValue ?? field.min ?? 0)}</small></div>`;
+  else if (field.type === "number") input = `<input id="${id}" data-key="${escapeHtml(field.key)}" type="number" ${field.min != null ? `min="${field.min}"` : ""} ${field.max != null ? `max="${field.max}"` : ""} ${field.step != null ? `step="${field.step}"` : ""} value="${escapeHtml(value ?? field.defaultValue ?? "")}">`;
   else if (isFileField(field)) {
     const acceptMap = { image: "image/*", video: "video/*", audio: "audio/*", gallery: "image/*", file: "*/*" };
     const accept = (field.fileTypes || []).map((item) => ({ image: "image/*", video: "video/*", audio: "audio/*" }[item] || item)).filter(Boolean);
     const hasMultiple = field.multiple === true || field.type === "gallery";
     const existing = normalizeSelectedFiles(value);
-    const fileSummary = existing.length ? \`Saved attachment: \${existing.map((file) => escapeHtml(file.name || "upload")).join(", ")}. It will be reused when cloning this job unless you choose a replacement.\` : (hasMultiple ? "Select one or more files. Attachments are kept in browser storage for queued jobs." : "Select the source or reference file. The original file is stored with the queued job.");
-    input = \`<input id="\${id}" data-key="\${escapeHtml(field.key)}" type="file" accept="\${escapeHtml(accept.length ? accept.join(",") : acceptMap[field.type] || "*/*")}" \${hasMultiple ? "multiple" : ""} \${profileMode ? "disabled" : ""}><small>\${fileSummary}</small>\`;
+    const fileSummary = existing.length ? `Saved attachment: ${existing.map((file) => escapeHtml(file.name || "upload")).join(", ")}. It will be reused when cloning this job unless you choose a replacement.` : (hasMultiple ? "Select one or more files. Attachments are kept in browser storage for queued jobs." : "Select the source or reference file. The original file is stored with the queued job.");
+    input = `<input id="${id}" data-key="${escapeHtml(field.key)}" type="file" accept="${escapeHtml(accept.length ? accept.join(",") : acceptMap[field.type] || "*/*")}" ${hasMultiple ? "multiple" : ""} ${profileMode ? "disabled" : ""}><small>${fileSummary}</small>`;
   }
-  else input = \`<input id="\${id}" data-key="\${escapeHtml(field.key)}" type="text" placeholder="\${escapeHtml(field.placeholder || "")}" value="\${escapeHtml(value ?? field.defaultValue ?? "")}">\`;
+  else input = `<input id="${id}" data-key="${escapeHtml(field.key)}" type="text" placeholder="${escapeHtml(field.placeholder || "")}" value="${escapeHtml(value ?? field.defaultValue ?? "")}">`;
   const full = ["textarea", "json", "gallery"].includes(field.type);
-  return \`<div class="field \${full ? "full" : ""}">\${field.type === "checkbox" ? input : \`<label for="\${id}">\${label}\${field.type === "number" && field.min != null ? \` <span class="muted">(min \${field.min})</span>\` : ""}</label>\${input}\`}\${hint}</div>\`;
+  return `<div class="field ${full ? "full" : ""}">${field.type === "checkbox" ? input : `<label for="${id}">${label}${field.type === "number" && field.min != null ? ` <span class="muted">(min ${field.min})</span>` : ""}</label>${input}`}${hint}</div>`;
 }
 function collectValues(container, endpoint, fileMap = null, fallbackValues = {}) {
   const values = {};
   for (const field of endpoint.fields) {
     if (field.hidden) { values[field.key] = field.passthrough ?? field.defaultValue ?? null; continue; }
     if (field.type === "checkboxgroup") {
-      const boxes = [...container.querySelectorAll(\`input[type=checkbox][data-key="\${CSS.escape(field.key)}"]\`)].filter((input) => input.checked);
-      const fallback = container.querySelector(\`input[data-key="\${CSS.escape(field.key)}"]:not([data-choice])\`);
+      const boxes = [...container.querySelectorAll(`input[type=checkbox][data-key="${CSS.escape(field.key)}"]`)].filter((input) => input.checked);
+      const fallback = container.querySelector(`input[data-key="${CSS.escape(field.key)}"]:not([data-choice])`);
       values[field.key] = boxes.length ? boxes.map((input) => input.dataset.choice) : fallback?.value.split(",").map((v) => v.trim()).filter(Boolean) || [];
       continue;
     }
-    const input = container.querySelector(\`[data-key="\${CSS.escape(field.key)}"]\`);
+    const input = container.querySelector(`[data-key="${CSS.escape(field.key)}"]`);
     if (!input) { if (Object.hasOwn(fallbackValues, field.key)) values[field.key] = fallbackValues[field.key]; continue; }
     if (isFileField(field)) {
       const selected = [...(input.files || [])];
