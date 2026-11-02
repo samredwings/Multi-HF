@@ -787,7 +787,7 @@ function openJobDetails(jobId) {
     <div class="section-head"><div><h2>Output gallery</h2><p>${result.length} normalized output item${result.length === 1 ? "" : "s"}</p></div></div>${renderResults(result)}
     <div class="form-actions"><button class="button" type="button" data-close>Close</button>${["failed", "paused"].includes(job.status) ? `<button class="button button-primary" id="detail-retry">Retry job</button>` : ""}<button class="button" id="detail-clone">Clone job</button></div>`);
   document.querySelector("#detail-retry")?.addEventListener("click", () => { job.status = "retry"; job.error = ""; job.attempts = 0; job.updatedAt = Date.now(); queueHalted = false; saveState(); dialog.close(); currentTab = "queue"; render(); ping("Job marked for retry."); });
-  document.querySelector("#detail-clone")?.addEventListener("click", () => { const profile = { modelId: job.modelId, apiName: job.apiName, values: job.values, accountId: job.accountId, name: job.name }; dialog.close(); openNewJob(job.modelId, profile); });
+  document.querySelector("#detail-clone")?.addEventListener("click", () => { const profile = { modelId: job.modelId, apiName: job.apiName, values: job.values, accountId: job.accountId, name: job.name, sourceJobId: job.id }; dialog.close(); openNewJob(job.modelId, profile); });
 }
 function renderResults(result) {
   if (!result.length) return `<div class="panel"><div class="empty"><div class="empty-mark">◫</div><strong>No media output to show</strong><p>Once the endpoint returns outputs, they will be shown here.</p></div></div>`;
@@ -801,67 +801,159 @@ function renderResults(result) {
   }).join("")}</div>`;
 }
 async function uploadFile(file, host, apiPrefix, headers, signal) {
-  const form = new FormData(); form.append("files", file, file.name);
+  const blob = file?.blob || file;
+  const filename = file?.name || blob?.name || "upload";
+  if (!(blob instanceof Blob)) throw new Error("A saved upload is not available as a browser file. Reattach it and retry.");
+  const form = new FormData();
+  form.append("files", blob, filename);
   let lastError;
-  for (const url of [`${host}${apiPrefix}/upload`, `${host}/upload`]) {
+  for (const url of [host + apiPrefix + "/upload", host + "/upload"]) {
     try {
       const response = await fetch(url, { method: "POST", headers, body: form, signal });
-      if (!response.ok) { const err = new Error(`Upload failed (HTTP ${response.status})`); err.status = response.status; throw err; }
+      if (!response.ok) {
+        const message = (await response.text()).slice(0, 500);
+        const error = new Error(message || ("Upload failed (HTTP " + response.status + ")"));
+        error.status = response.status;
+        throw error;
+      }
       const body = await response.json();
-      const path = Array.isArray(body) ? body[0] : body?.path || body?.files?.[0]?.path || body?.[0]?.path;
+      const first = Array.isArray(body) ? body[0] : (body?.files?.[0] || body);
+      const path = typeof first === "string" ? first : (first?.path || first?.url);
       if (!path) throw new Error("Space upload endpoint returned no file path.");
-      return { path, url: /^https?:\/\//i.test(path) ? path : `${host}/file=${path.replace(/^\//, "")}`, orig_name: file.name, size: file.size, mime_type: file.type || "application/octet-stream" };
-    } catch (error) { lastError = error; if (![404, 405].includes(error.status)) break; }
+      const urlValue = typeof first === "object" && first?.url
+        ? first.url
+        : (/^https?:\/\//i.test(path) ? path : host + "/file=" + String(path).replace(/^\//, ""));
+      return {
+        ...(typeof first === "object" ? first : {}),
+        path: typeof first === "object" && first?.path ? first.path : path,
+        url: urlValue,
+        orig_name: first?.orig_name || filename,
+        size: Number(first?.size || file?.size || blob.size || 0),
+        mime_type: first?.mime_type || file?.type || blob.type || "application/octet-stream",
+      };
+    } catch (error) {
+      lastError = error;
+      if (![404, 405].includes(error.status)) break;
+    }
   }
   throw lastError || new Error("Could not upload file input.");
 }
-async function callGradio(model, endpoint, values, job, headers, signal) {
+async function prepareGradioJob(job, model, endpoint, headers, signal) {
   if (/^load_example(?:_(?:input|output))?(?:_\d+)?$/i.test(endpoint.apiName)) {
-    throw new Error("This Space endpoint only loads a Gradio example; it cannot generate output. Refresh the Space schema and choose its inference endpoint.");
+    throw new Error("This Space endpoint only loads a Gradio example; choose its inference endpoint.");
   }
+  const files = await getJobAttachments(job);
   const data = [];
-  const files = jobFiles.get(job.id) || new Map();
+  const prefix = model.apiPrefix || "/gradio_api";
   for (const field of endpoint.fields) {
-    if (field.hidden) { data.push(field.passthrough ?? field.defaultValue ?? null); continue; }
-    let value = values[field.key];
-    if (["image", "video", "audio", "file"].includes(field.type)) {
-      const file = files.get(field.key);
-      if (file) value = await uploadFile(file, model.host, model.apiPrefix || "/gradio_api", headers, signal);
-      else if (value?.path || value?.url) { /* already-uploaded file reference: send as is */ }
-      else if (value?.name) throw new Error(`File “${value.name}” is not available in memory. Reattach it by cloning the job before retrying.`);
-      else value = null;
+    if (field.hidden) {
+      data.push(field.passthrough ?? field.defaultValue ?? null);
+      continue;
+    }
+    let value = job.values?.[field.key];
+    if (isFileField(field)) {
+      const selected = normalizeSelectedFiles(files.get(field.key));
+      if (selected.length) {
+        const uploaded = await Promise.all(selected.map((file) => uploadFile(file, model.host, prefix, headers, signal)));
+        if (field.type === "gallery") {
+          value = uploaded.map((imageFile) => ({ image: imageFile, caption: null }));
+        } else if (field.multiple === true) {
+          value = uploaded;
+        } else {
+          value = uploaded[0];
+        }
+      } else if (value?.path || value?.url) {
+        // A previously uploaded Gradio FileData value can be reused.
+      } else if (Array.isArray(value) && value.some((item) => item?.name)) {
+        throw new Error("One or more files for “" + (field.label || field.key) + "” are missing. Clone the job and attach them again.");
+      } else if (value?.name) {
+        throw new Error("The file for “" + (field.label || field.key) + "” is missing. Clone the job and attach it again.");
+      } else {
+        value = null;
+      }
     }
     data.push(value ?? null);
   }
-  const sessionHash = Math.random().toString(36).slice(2, 12);
-  const api = encodeURIComponent(endpoint.apiName);
-  const prefix = model.apiPrefix || "/gradio_api";
+  return {
+    job,
+    model,
+    endpoint,
+    headers,
+    data,
+    prefix,
+    api: encodeURIComponent(endpoint.apiName),
+    sessionHash: Math.random().toString(36).slice(2, 12),
+  };
+}
+async function submitGradioJob(prepared, signal) {
+  const job = prepared.job;
+  if (job.remoteEventId) return { ...prepared, eventId: job.remoteEventId };
+  const body = JSON.stringify({ data: prepared.data, session_hash: prepared.sessionHash });
   let response;
   try {
-    response = await fetch(`${model.host}${prefix}/call/${api}`, { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify({ data, session_hash: sessionHash }), signal });
-  } catch (error) { if (isAbortError(error)) throw error; throw new Error(`Could not reach the Space. Check its availability and browser CORS settings. ${error.message}`); }
-  if (response.ok) {
-    let initial;
-    try { initial = await response.json(); } catch {}
-    if (initial?.error || initial?.success === false) throw new Error(errorMessage(initial));
-    if (initial?.event_id) {
-      const stream = await fetch(`${model.host}${prefix}/call/${api}/${encodeURIComponent(initial.event_id)}`, { headers, signal });
-      if (!stream.ok) { const text = (await stream.text()).slice(0, 600); const err = new Error(text || `Result stream failed (HTTP ${stream.status})`); err.status = stream.status; throw err; }
-      return await readGradioStream(stream, (payload) => { job.progress = typeof payload?.progress === "number" ? payload.progress : job.progress; job.updatedAt = Date.now(); saveStateSoon(); });
-    }
-    if (initial?.data) return initial.data;
-    if (initial?.output?.data) return initial.output.data;
+    response = await fetch(prepared.model.host + prepared.prefix + "/call/" + prepared.api, {
+      method: "POST",
+      headers: { ...prepared.headers, "Content-Type": "application/json" },
+      body,
+      signal,
+    });
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    error.submissionUncertain = true;
+    throw new Error("The submission connection failed before an event ID was returned. The Space may or may not have accepted it; check the hosted Space queue before retrying to avoid duplicate GPU work. " + error.message);
   }
-  // Older Gradio builds expose the synchronous run endpoint instead of /call.
   if ([404, 405, 501].includes(response.status)) {
-    const fallback = await fetch(`${model.host}${prefix}/run/${api}`, { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify({ data, session_hash: sessionHash }), signal });
-    if (!fallback.ok) { const message = (await fallback.text()).slice(0, 700); const err = new Error(message || `Generation failed (HTTP ${fallback.status})`); err.status = fallback.status; throw err; }
-    const output = await fallback.json();
+    // Legacy Gradio /run is synchronous; only this fallback has to wait here.
+    const legacy = await fetch(prepared.model.host + prepared.prefix + "/run/" + prepared.api, {
+      method: "POST",
+      headers: { ...prepared.headers, "Content-Type": "application/json" },
+      body,
+      signal,
+    });
+    if (!legacy.ok) {
+      const message = (await legacy.text()).slice(0, 700);
+      const error = new Error(message || ("Generation failed (HTTP " + legacy.status + ")"));
+      error.status = legacy.status;
+      throw error;
+    }
+    const output = await legacy.json();
     if (output?.error) throw new Error(typeof output.error === "string" ? output.error : JSON.stringify(output.error));
-    return output?.data ?? output?.output?.data ?? output;
+    return { ...prepared, immediateData: output?.data ?? output?.output?.data ?? output };
   }
-  const message = response.ok ? "Gradio did not return an event id or output." : (await response.text()).slice(0, 700);
-  const error = new Error(message || `Generation failed (HTTP ${response.status})`); error.status = response.status; throw error;
+  let initial = {};
+  try { initial = await response.json(); }
+  catch {
+    const error = new Error("Gradio returned an invalid submission response.");
+    error.status = response.status;
+    throw error;
+  }
+  if (!response.ok || initial?.error || initial?.success === false) {
+    const error = new Error(errorMessage(initial) || ("Generation submission failed (HTTP " + response.status + ")"));
+    error.status = response.status;
+    throw error;
+  }
+  if (initial?.event_id) return { ...prepared, eventId: String(initial.event_id) };
+  if (Object.hasOwn(initial || {}, "data")) return { ...prepared, immediateData: initial.data };
+  if (Object.hasOwn(initial?.output || {}, "data")) return { ...prepared, immediateData: initial.output.data };
+  throw new Error("Gradio accepted the request but returned neither an event ID nor result data.");
+}
+async function waitForGradioJob(submission, signal) {
+  if (Object.hasOwn(submission, "immediateData")) return submission.immediateData;
+  if (!submission.eventId) throw new Error("The submitted job has no event ID to monitor.");
+  const streamUrl = submission.model.host + submission.prefix + "/call/" + submission.api + "/" + encodeURIComponent(submission.eventId);
+  const stream = await fetch(streamUrl, { headers: submission.headers, signal });
+  if (!stream.ok) {
+    const message = (await stream.text()).slice(0, 600);
+    const error = new Error(message || ("Result stream failed (HTTP " + stream.status + ")"));
+    error.status = stream.status;
+    throw error;
+  }
+  return await readGradioStream(stream, (payload) => {
+    submission.job.progress = typeof payload?.progress === "number" ? payload.progress : submission.job.progress;
+    submission.job.phase = "Waiting in Space queue / receiving output";
+    submission.job.updatedAt = Date.now();
+    saveStateSoon();
+  });
 }
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // Wait for `ms`, waking early if the user pauses the queue. Returns false when paused.
