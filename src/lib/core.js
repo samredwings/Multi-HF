@@ -9,6 +9,21 @@ export function normalizeSpaceFramework(value) {
   return ["gradio", "streamlit", "docker", "static", "custom"].includes(framework) ? framework : "unknown";
 }
 
+/** Extract a stable hardware flavor from Hub metadata, including nested runtime objects. */
+export function normalizeHardwareIdentifier(value) {
+  if (typeof value === "string") return value.trim().slice(0, 80);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+  for (const key of ["current", "name", "id", "hardware", "flavor", "type", "slug", "label", "requested"]) {
+    const candidate = value[key];
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim().slice(0, 80);
+    if (candidate && typeof candidate === "object") {
+      const nested = normalizeHardwareIdentifier(candidate);
+      if (nested) return nested;
+    }
+  }
+  return "";
+}
+
 export function normalizeGradioVersion(...candidates) {
   for (const candidate of candidates) {
     if (typeof candidate !== "string") continue;
