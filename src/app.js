@@ -1,5 +1,5 @@
 import {
-  parseSpaceInput, normalizeHost, parseSpaceConfig, normalizeGradioVersion, taskFromEndpoints, classifyFailure,
+  parseSpaceInput, normalizeHost, parseSpaceConfig, normalizeGradioVersion, normalizeSpaceFramework, taskFromEndpoints, classifyFailure,
   holdFor, normalizeOutputs, safeId, tokenHeaders, persistableResult, recoverRunningJobs, sanitizeWorkspace, readGradioStream, errorMessage,
 } from "./lib/core.js";
 
@@ -220,7 +220,7 @@ function renderSpaceUi(model) {
     document.querySelector("#space-ui-back")?.addEventListener("click", () => { currentSpaceUi = null; currentTab = "models"; render(); });
     return;
   }
-  const version = normalizeGradioVersion(model.gradioVersion);
+  const version = model.framework === "gradio" ? normalizeGradioVersion(model.gradioVersion) : "";
   if (!version) currentSpaceMode = "iframe";
   const standaloneUrl = model.ref
     ? "https://huggingface.co/spaces/" + model.ref.split("/").map(encodeURIComponent).join("/")
@@ -230,10 +230,10 @@ function renderSpaceUi(model) {
     : "";
   const modeButton = version
     ? '<button class="button button-sm" id="space-ui-toggle">' + (currentSpaceMode === "native" ? "Use iframe fallback" : "Use native Gradio UI") + '</button>'
-    : '<span class="badge warning">Gradio version not detected · iframe mode</span>';
+    : '<span class="badge warning">' + escapeHtml((model.framework || "unknown").toUpperCase()) + ' · hosted UI mode</span>';
   view.innerHTML = `
     <div class="section-head space-ui-header">
-      <div><h2>Model interface</h2><p>Multi-HF loads the Space's own Gradio interface. The selected runtime version is used when available.</p></div>
+      <div><h2>Model interface</h2><p>Framework: ${escapeHtml((model.framework || "unknown").toUpperCase())}. Multi-HF loads the Space's own hosted UI; Gradio uses its matching web component when available.</p></div>
       <div class="inline-actions">
         <button class="button button-sm" id="space-ui-back">← Workspace</button>
         ${modeButton}
@@ -395,8 +395,23 @@ async function discoverSpace(modelId = null, options = {}) {
     try { config = await fetchJson(`${host}${suffix}`, { headers: authHeaders(accountId, `${host}${suffix}`, apiData?.private === true || options.sendToken === true || prior?.sendToken === true) }, "Could not read the Gradio config"); break; }
     catch (error) { configError = error; if (error.status !== 404 && error.status !== 405) break; }
   }
-  if (!config) throw new Error(`${configError?.message || "Could not read this Space's Gradio config."} If this Space is private, connect a token; if browser access is blocked, use a browser with compatible CORS permissions.`);
-  const schema = parseSpaceConfig(config);
+  let schema;
+  let framework;
+  if (config) {
+    schema = parseSpaceConfig(config);
+    framework = "gradio";
+  } else {
+    framework = normalizeSpaceFramework(apiData?.sdk || apiData?.cardData?.sdk);
+    if (!apiData || framework === "unknown") {
+      throw new Error(`${configError?.message || "Could not read this Space's Gradio config."} If this Space is private, connect a token; if browser access is blocked, use a browser with compatible CORS permissions.`);
+    }
+    schema = {
+      title: apiData?.cardData?.title || resolvedId || host,
+      apiPrefix: "/gradio_api",
+      gradioVersion: normalizeGradioVersion(apiData?.sdk_version, apiData?.cardData?.sdk_version),
+      endpoints: [],
+    };
+  }
   const id = resolvedId || prior?.id || host;
   const name = options.note || prior?.note || "";
   const model = {
@@ -404,6 +419,7 @@ async function discoverSpace(modelId = null, options = {}) {
     title: name || schema.title || apiData?.cardData?.title || resolvedId || host,
     task: taskFromEndpoints(schema.endpoints), apiPrefix: schema.apiPrefix,
     gradioVersion: normalizeGradioVersion(schema.gradioVersion, apiData?.sdk_version, apiData?.cardData?.sdk_version),
+    framework,
     endpoints: schema.endpoints, activeApi: schema.endpoints[0]?.apiName || "", accountId, private: apiData?.private === true, sendToken: options.sendToken ?? prior?.sendToken === true,
     hardware: apiData?.runtime?.hardware?.current || apiData?.runtime?.hardware || "Unknown", fetchedAt: Date.now(), note: name,
   };
@@ -464,7 +480,7 @@ function openNewJob(modelId = null, profile = null) {
   if (!state.models.length) { currentTab = "models"; render(); openAddSpace(); return; }
   const model = getModel(modelId) || getModel(profile?.modelId) || state.models[0];
   const endpoint = endpointFor(model, profile?.apiName || model.activeApi);
-  if (!endpoint) { ping("This Space has no runnable endpoints. Refresh its schema."); return; }
+  if (!endpoint) { ping("This Space has no discovered Gradio API. Its hosted interface is available, but queued jobs are not."); return; }
   const files = new Map();
   const profiles = state.profiles.filter((p) => p.modelId === model.id);
   const accounts = [{ id: "", label: "Public / no token" }, ...connectedAccounts().filter((a) => a.enabled).map((a) => ({ id: a.id, label: a.label }))];
