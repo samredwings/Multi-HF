@@ -4,6 +4,11 @@ const LAYOUT = new Set([
 ]);
 const KNOWN_HF_HOSTS = new Set(["huggingface.co", "www.huggingface.co", "hf.co"]);
 
+export function normalizeSpaceFramework(value) {
+  const framework = String(value ?? "").trim().toLowerCase();
+  return ["gradio", "streamlit", "docker", "static", "custom"].includes(framework) ? framework : "unknown";
+}
+
 export function normalizeGradioVersion(...candidates) {
   for (const candidate of candidates) {
     if (typeof candidate !== "string") continue;
