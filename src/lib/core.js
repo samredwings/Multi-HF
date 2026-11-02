@@ -75,6 +75,7 @@ function typeFor(rawType, props) {
   if (LAYOUT.has(type)) return "skip";
   if (type === "textbox") return Number(props.lines ?? 1) > 1 || /prompt|caption|description|negative/i.test(String(props.label ?? "")) ? "textarea" : "text";
   if (type === "gallery") return "gallery";
+  if (type === "gallery") return "gallery";
   if (type === "json") return "json";
   if (type === "colorpicker") return "color";
   if (type === "date") return "date";
@@ -99,6 +100,7 @@ function defaultFor(type, value, choices) {
   if (["select", "radio"].includes(type)) return value == null ? (choices[0]?.value ?? "") : String(value);
   if (type === "json") { try { return JSON.stringify(value ?? {}, null, 2); } catch { return "{}"; } }
   if (type === "gallery") return Array.isArray(value) ? value : [];
+  if (type === "gallery") return Array.isArray(value) ? value : [];
   return typeof value === "string" ? value : "";
 }
 function toField(component) {
@@ -115,6 +117,8 @@ function toField(component) {
     placeholder: typeof props.placeholder === "string" ? stripEmoji(props.placeholder) : "",
     min: number(props.minimum ?? props.min), max: number(props.maximum ?? props.max), step: number(props.step),
     choices, allowCustom: props.allow_custom_value === true, defaultValue: defaultFor(type, props.value, choices),
+    multiple: type === "gallery" || props.file_count === "multiple" || props.file_count === "directory" || props.multiple === true,
+    fileTypes: Array.isArray(props.file_types) ? props.file_types.filter((item) => typeof item === "string").slice(0, 20) : [],
     multiple: type === "gallery" || props.file_count === "multiple" || props.file_count === "directory" || props.multiple === true,
     fileTypes: Array.isArray(props.file_types) ? props.file_types.filter((item) => typeof item === "string").slice(0, 20) : [],
     passthrough: hidden && props.value && typeof props.value === "object" ? props.value : undefined,
@@ -241,27 +245,31 @@ export function safeId(prefix = "id") { return `${prefix}-${Date.now().toString(
 /** Keep each Space/account batch together to reduce avoidable model/Space switching.
  * The first pending job chooses the batch; jobs keep their creation order within it.
  */
-export function nextQueueBatch(jobs) {
+export function nextQueueBatch(jobs, batchMode = true) {
   const ready = (Array.isArray(jobs) ? jobs : [])
     .filter((job) => job && ["ready", "retry"].includes(job.status))
     .slice()
     .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
   const first = ready[0];
   if (!first) return [];
+  if (!batchMode) return [first];
+  // Group queued work for the same Space/account to avoid repeated cold starts.
   return ready.filter((job) => job.modelId === first.modelId && (job.accountId || "") === (first.accountId || ""));
 }
 
-/** Normalize the authenticated account's ZeroGPU quota response (GPU-seconds). */
+/** Normalize /api/spaces/zero-gpu/quota (GPU-seconds). HTTP uses current/resetsAt. */
 export function normalizeZeroGpuQuota(raw) {
   const value = record(raw);
   const base = Number(value?.base);
-  const remaining = Number(value?.remaining);
+  const remaining = Number(value?.current ?? value?.remaining);
   if (!Number.isFinite(base) || !Number.isFinite(remaining)) throw new Error("Hugging Face returned an invalid ZeroGPU quota response.");
+  const reset = value.resetsAt ?? value.resets_at;
+  const overquota = value.overquotaUsed ?? value.overquota_used;
   return {
     base: Math.max(0, base),
     remaining: Math.max(0, remaining),
-    resetsAt: typeof value.resets_at === "string" && value.resets_at ? value.resets_at : null,
-    overquotaUsed: Number.isFinite(Number(value.overquota_used)) ? Math.max(0, Number(value.overquota_used)) : 0,
+    resetsAt: typeof reset === "string" && reset ? reset : null,
+    overquotaUsed: Number.isFinite(Number(overquota)) ? Math.max(0, Number(overquota)) : 0,
   };
 }
 
@@ -317,7 +325,7 @@ function cleanEndpoint(raw) {
   if (!ep || typeof ep.apiName !== "string" || !/^[\w.-]+$/.test(ep.apiName)) return null;
   const fields = (Array.isArray(ep.fields) ? ep.fields : []).map(record).filter((f) => f && typeof f.key === "string" && /^c\d+$/.test(f.key) && FIELD_TYPES.has(f.type));
   const outputs = (Array.isArray(ep.outputs) ? ep.outputs : []).map(record).filter((o) => o && typeof o.key === "string").map((o) => ({ key: o.key, label: text(o.label, 120) || "Output", type: text(o.type, 40) || "text" }));
-  return { apiName: ep.apiName, fields: fields.map((f) => ({ ...f, choices: Array.isArray(f.choices) ? f.choices : [] })), outputs };
+  return { apiName: ep.apiName, fields: fields.map((f) => ({ ...f, choices: Array.isArray(f.choices) ? f.choices : [], multiple: f.multiple === true, fileTypes: Array.isArray(f.fileTypes) ? f.fileTypes.filter((item) => typeof item === "string").slice(0, 20) : [] })), outputs };
 }
 function cleanResult(raw) {
   const item = record(raw);
