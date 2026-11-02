@@ -396,11 +396,12 @@ export function sanitizeWorkspace(data) {
   const known = new Set(models.map((m) => m.id));
   const profiles = root.profiles.map(record).filter((p) => p && typeof p.id === "string" && known.has(p.modelId)).map((p) => ({
     id: text(p.id, 100), name: text(p.name, 120), modelId: p.modelId, apiName: text(p.apiName, 100),
-    values: record(p.values) ?? {}, accountId: text(p.accountId, 100), createdAt: finite(p.createdAt) ?? 0, updatedAt: finite(p.updatedAt) ?? 0,
+    values: record(p.values) ?? {}, accountId: text(p.accountId, 100), reservationSeconds: Math.max(1, Math.min(600, finite(p.reservationSeconds) ?? 60)), createdAt: finite(p.createdAt) ?? 0, updatedAt: finite(p.updatedAt) ?? 0,
   }));
   const jobs = root.jobs.map(record).filter((j) => j && typeof j.id === "string" && known.has(j.modelId)).map((j) => ({
     id: text(j.id, 100), name: text(j.name, 200), modelId: j.modelId, apiName: text(j.apiName, 100), accountId: text(j.accountId, 100),
     values: record(j.values) ?? {}, files: Array.isArray(j.files) ? j.files.filter((f) => typeof f === "string") : [],
+    reservationSeconds: Math.max(1, Math.min(600, finite(j.reservationSeconds) ?? 60)),
     status: JOB_STATUSES.has(j.status) ? j.status : "failed", error: text(j.error, 2000),
     remoteEventId: text(j.remoteEventId, 300), phase: text(j.phase, 160), batchId: text(j.batchId, 100),
     result: (Array.isArray(j.result) ? j.result : []).map(cleanResult).filter(Boolean),
