@@ -45,6 +45,8 @@ test("classifies errors and does not fabricate quota reset timestamps", () => {
   assert.equal(classifyFailure(401, "Unauthorized"), "auth");
   assert.equal(classifyFailure(402, "Payment required"), "quota");
   assert.equal(classifyFailure(503, "Upstream unavailable"), "transient");
+  assert.equal(classifyFailure(undefined, "Failed to fetch"), "transient");
+  assert.equal(classifyFailure(undefined, "The operation was aborted"), "transient");
   assert.equal(classifyFailure(200, "content policy blocked"), "policy");
   assert.equal(holdFor("quota", "GPU quota exceeded", null, 1000), null);
   assert.equal(holdFor("quota", "GPU quota exceeded", "2030-01-01T00:00:00Z", 1000), Date.parse("2030-01-01T00:00:00Z"));
