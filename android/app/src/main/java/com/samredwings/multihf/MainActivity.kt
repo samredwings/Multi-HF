@@ -2,6 +2,7 @@ package com.samredwings.multihf
 
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.content.res.ColorStateList
 import android.net.Uri
 import android.os.Bundle
 import android.view.ViewGroup
@@ -12,6 +13,8 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
+import android.widget.Button
+import android.widget.LinearLayout
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
@@ -27,6 +30,21 @@ class MainActivity : ComponentActivity() {
     private val appHost = "appassets.androidplatform.net"
     private val diagnosticsPrefs by lazy { getSharedPreferences("multi_hf_diagnostics", MODE_PRIVATE) }
     private val diagnosticsLock = Any()
+    private var pendingDebugReport: String? = null
+    private val debugReportPicker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val report = pendingDebugReport
+        pendingDebugReport = null
+        val uri = if (result.resultCode == RESULT_OK) result.data?.data else null
+        if (uri != null && report != null) {
+            try {
+                val output = contentResolver.openOutputStream(uri) ?: throw IllegalStateException("Could not open the selected file.")
+                output.use { it.write(report.toByteArray(Charsets.UTF_8)) }
+                Toast.makeText(this, "Debug report saved.", Toast.LENGTH_LONG).show()
+            } catch (error: Exception) {
+                Toast.makeText(this, "Could not save debug report: " + (error.message ?: "Storage error"), Toast.LENGTH_LONG).show()
+            }
+        }
+    }
     private val filePicker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val selected = if (result.resultCode == RESULT_OK) {
             val data = result.data
@@ -84,7 +102,7 @@ class MainActivity : ComponentActivity() {
                 super.onPageFinished(view, url)
                 if (Uri.parse(url ?: "").host == appHost) {
                     val entries = nativeDiagnosticsSnapshot()
-                    view?.evaluateJavascript("window.MultiHFDiagnostics?.importNativeEntries($entries);", null)
+                    view?.evaluateJavascript("document.getElementById('export-debug-report')?.setAttribute('hidden','hidden'); window.MultiHFDiagnostics?.importNativeEntries($entries);", null)
                 }
             }
 
@@ -153,11 +171,42 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-        setContentView(webView)
+        val exportButton = Button(this).apply {
+            text = "Save full debug report"
+            setTextColor(android.graphics.Color.WHITE)
+            backgroundTintList = ColorStateList.valueOf(android.graphics.Color.rgb(46, 67, 91))
+            setOnClickListener { requestDebugReportSave() }
+        }
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(android.graphics.Color.rgb(13, 17, 23))
+            addView(exportButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            addView(webView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        }
+        setContentView(root)
         if (savedInstanceState == null) {
             webView.loadUrl("https://$appHost/index.html")
         } else {
             webView.restoreState(savedInstanceState)
+        }
+    }
+
+    private fun requestDebugReportSave() {
+        if (!::webView.isInitialized) return
+        webView.evaluateJavascript("window.MultiHFDiagnostics?.buildReportJson?.()") { encoded ->
+            try {
+                val report = JSONArray("[$encoded]").getString(0)
+                if (report.isBlank() || !report.trimStart().startsWith("{")) throw IllegalStateException("The app has not finished preparing the debug report.")
+                pendingDebugReport = report
+                val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "application/json"
+                    putExtra(Intent.EXTRA_TITLE, "multi-hf-debug-report-" + System.currentTimeMillis() + ".json")
+                }
+                debugReportPicker.launch(intent)
+            } catch (error: Exception) {
+                Toast.makeText(this, "Could not prepare debug report: " + (error.message ?: "Unknown error"), Toast.LENGTH_LONG).show()
+            }
         }
     }
 
