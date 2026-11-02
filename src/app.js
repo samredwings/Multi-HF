@@ -1120,6 +1120,7 @@ async function runQueue() {
 
       // POSTs return event IDs quickly; the Space's own queue handles actual GPU execution.
       const submissions = [];
+      const monitors = [];
       for (const item of preparedResults) {
         if (!item || item.error) continue;
         if (queueHalted || controller.signal.aborted) {
@@ -1141,36 +1142,38 @@ async function runQueue() {
           }
           item.job.updatedAt = Date.now();
           saveState();
-          submissions.push({ ...item, submission: submitted });
+          const monitored = { ...item, submission: submitted };
+          submissions.push(monitored);
+          // Open the result stream immediately after each event ID arrives, while
+          // the next POST is being submitted. This avoids missing fast completions.
+          monitors.push((async () => {
+            try {
+              const raw = await waitForGradioJob(submitted, item.timer.signal);
+              item.job.result = normalizeOutputs(raw, "Output", host);
+              item.job.status = "done";
+              item.job.error = "";
+              item.job.phase = "Complete";
+              item.job.remoteEventId = "";
+              item.job.attempts = 0;
+              item.job.finishedAt = Date.now();
+              item.job.updatedAt = Date.now();
+              item.job.progress = 1;
+              saveState();
+              ping("Completed: " + (item.job.name || model.title));
+            } catch (error) {
+              item.retryDelay = failJob(item.job, error, item.tokenSent, item.timer.signal);
+            } finally {
+              item.timer.done();
+              jobTimers.delete(item.job.id);
+            }
+          })());
         } catch (error) {
           item.retryDelay = failJob(item.job, error, item.tokenSent, item.timer.signal);
         }
       }
       saveState();
-
-      // Attach all event streams concurrently; do not wait for job 1's image before monitoring job 2.
-      await Promise.all(submissions.map(async (item) => {
-        try {
-          const raw = await waitForGradioJob(item.submission, item.timer.signal);
-          item.job.result = normalizeOutputs(raw, "Output", host);
-          item.job.status = "done";
-          item.job.error = "";
-          item.job.phase = "Complete";
-          item.job.remoteEventId = "";
-          item.job.attempts = 0;
-          item.job.finishedAt = Date.now();
-          item.job.updatedAt = Date.now();
-          item.job.progress = 1;
-          saveState();
-          ping("Completed: " + (item.job.name || model.title));
-        } catch (error) {
-          item.retryDelay = failJob(item.job, error, item.tokenSent);
-        } finally {
-          item.timer.done();
-          jobTimers.delete(item.job.id);
-        }
-      }));
-
+      // All accepted jobs now have independent result streams open.
+      await Promise.all(monitors);
       // Jobs that were prepared but not accepted remain safely staged for the next run.
       for (const item of preparedResults) {
         if (item && !item.error && !submissions.some((submitted) => submitted.job.id === item.job.id) && item.job.status === "running") {
