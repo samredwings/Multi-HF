@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseSpaceInput, parseSpaceConfig, taskFromEndpoints, classifyFailure, holdFor, normalizeOutputs, normalizeHost } from "../src/lib/core.js";
+import { parseSpaceInput, parseSpaceConfig, taskFromEndpoints, classifyFailure, holdFor, normalizeOutputs, normalizeHost, normalizeGradioVersion } from "../src/lib/core.js";
 
 test("parses accepted Space identifiers and rejects arbitrary hosts", () => {
   assert.deepEqual(parseSpaceInput("owner/space-name"), { id: "owner/space-name", host: null });
@@ -56,4 +56,27 @@ test("normalizes image, video, file, and text outputs", () => {
   assert.equal(normalizeOutputs("https://cdn.example/out.mp4", "x")[0].kind, "video");
   assert.equal(normalizeOutputs("A complete sentence", "x")[0].kind, "text");
   assert.equal(normalizeOutputs([{ url: "https://cdn.example/sound.wav", mime_type: "audio/wav" }], "x")[0].kind, "audio");
+});
+
+test("normalizes Gradio runtime versions safely for UI embedding", () => {
+  assert.equal(normalizeGradioVersion("v5.12.0", "4.44.1"), "5.12.0");
+  assert.equal(normalizeGradioVersion("latest", "6.0"), "6.0");
+  assert.equal(normalizeGradioVersion("https://evil.example/x"), "");
+});
+
+test("maps JSON, color, and date controls from Gradio config", () => {
+  const config = {
+    version: "5.12.0",
+    components: [
+      { id: 1, type: "json", props: { label: "Settings", value: { seed: 42 } } },
+      { id: 2, type: "colorpicker", props: { label: "Tint", value: "#ffffff" } },
+      { id: 3, type: "date", props: { label: "Start date", value: "2026-01-01" } },
+      { id: 4, type: "textbox", props: { label: "Result" } }
+    ],
+    dependencies: [{ api_name: "generate", inputs: [1, 2, 3], outputs: [4] }]
+  };
+  const parsed = parseSpaceConfig(config);
+  assert.equal(parsed.gradioVersion, "5.12.0");
+  assert.deepEqual(parsed.endpoints[0].fields.map((field) => field.type), ["json", "color", "date"]);
+  assert.equal(parsed.endpoints[0].fields[0].defaultValue, JSON.stringify({ seed: 42 }, null, 2));
 });
