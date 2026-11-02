@@ -1147,6 +1147,8 @@ async function runQueue() {
           item.job.status = "ready";
           item.job.phase = "";
           item.job.updatedAt = Date.now();
+          item.timer.done();
+          jobTimers.delete(item.job.id);
           return;
         }
         try {
@@ -1189,16 +1191,6 @@ async function runQueue() {
       saveState();
       // All accepted jobs now have independent result streams open.
       await Promise.all(monitors);
-      // Jobs that were prepared but not accepted remain safely staged for the next run.
-      for (const item of preparedResults) {
-        if (item && !item.error && !submissions.some((submitted) => submitted.job.id === item.job.id) && item.job.status === "running") {
-          item.job.status = "ready";
-          item.job.phase = "";
-          item.job.updatedAt = Date.now();
-          item.timer.done();
-          jobTimers.delete(item.job.id);
-        }
-      }
       for (const item of preparedResults) {
         if (item?.error) {
           item.timer.done();
