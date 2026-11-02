@@ -68,3 +68,16 @@ test("workspace import keeps UI-only Spaces with a recognized framework", () => 
   assert.deepEqual(imported.models.map((item) => item.framework), ["streamlit", "gradio"]);
   assert.equal(imported.models[1].activeApi, "");
 });
+
+
+test("running jobs with a remote Gradio event recover without losing the event id", () => {
+  const recovered = recoverRunningJobs([
+    { id: "remote-1", status: "running", remoteEventId: "event-123", modelId: "a/b" },
+    { id: "local-1", status: "running", modelId: "a/b" }
+  ]);
+  assert.equal(recovered[0].status, "paused");
+  assert.equal(recovered[0].remoteEventId, "event-123");
+  assert.match(recovered[0].error, /Resume its result stream/i);
+  assert.equal(recovered[1].status, "paused");
+  assert.doesNotMatch(recovered[1].error, /event ID/i);
+});
