@@ -245,7 +245,9 @@ function renderQuotaPanel() {
   else if (quotaState.data && quotaState.accountId === preferred) {
     const quota = quotaState.data;
     const pct = quota.base > 0 ? Math.max(0, Math.min(100, quota.remaining / quota.base * 100)) : 0;
-    quotaBody = `<div class="quota-metrics"><div><span class="muted">Remaining</span><strong>${formatGpuTime(quota.remaining)}</strong></div><div><span class="muted">Daily allowance</span><strong>${formatGpuTime(quota.base)}</strong></div><div><span class="muted">Paid overage used</span><strong>${formatGpuTime(quota.overquotaUsed)}</strong></div></div><div class="quota-meter"><span style="width:${pct}%"></span></div><p class="help">${quota.resetsAt ? "Quota resets " + escapeHtml(fmtDate(quota.resetsAt)) : "Reset time not reported yet"} · refreshed ${escapeHtml(timeAgo(quotaState.checkedAt))}</p>`;
+    const runSummary = quota.runs ? `<p class="help">Runs remaining: ${quota.runs.remaining}${quota.runs.limit ? " / " + quota.runs.limit : ""}${quota.runs.resetsAt ? " · resets " + escapeHtml(fmtDate(quota.runs.resetsAt)) : ""}</p>` : "";
+    const lowWarning = quota.remaining > 0 && quota.remaining < 60 ? '<div class="quota-warning">Less than 60 GPU-seconds remain. Many ZeroGPU Spaces reserve 60 seconds per call by default; some Spaces define a shorter or longer duration.</div>' : "";
+    quotaBody = `<div class="quota-metrics"><div><span class="muted">Remaining</span><strong>${formatGpuTime(quota.remaining)}</strong></div><div><span class="muted">Daily allowance</span><strong>${formatGpuTime(quota.base)}</strong></div><div><span class="muted">Paid overage used</span><strong>${formatGpuTime(quota.overquotaUsed)}</strong></div></div><div class="quota-meter"><span style="width:${pct}%"></span></div><p class="help">${quota.resetsAt ? "Quota resets " + escapeHtml(fmtDate(quota.resetsAt)) : "Reset time not reported yet"} · refreshed ${escapeHtml(timeAgo(quotaState.checkedAt))}</p>${runSummary}${lowWarning}`;
   } else if (quotaState.error && quotaState.accountId === preferred) quotaBody = `<p class="help">${escapeHtml(quotaState.error)}</p>`;
   else quotaBody = '<p class="help">Check your account’s remaining ZeroGPU GPU-seconds. Requires a fine-grained token with “Billing → Read billing usage and payment method status” permission.</p>';
   return `<div class="panel quota-panel"><div class="panel-head"><div><h2>ZeroGPU allowance</h2><div class="subtext">Live GPU-seconds for the selected Hugging Face account · GPU time, not wall-clock time</div><p class="help">The 5-minute Free-account allowance is used when the Space receives your token. Public Spaces do not receive it unless you explicitly turn on “Token: sent” for that Space; otherwise anonymous requests have a lower limit.</p></div><div class="inline-actions">${accounts.length ? `<select id="quota-account" aria-label="Quota account">${options}</select>` : ""}<button class="button button-sm" id="quota-refresh" ${!accounts.length || quotaState.loading ? "disabled" : ""}>${quotaState.loading ? "Checking…" : "Refresh quota"}</button></div></div><div class="panel-body">${quotaBody}</div></div>`;
@@ -638,7 +640,7 @@ function inputElement(field, value, profileMode = false) {
   else if (field.type === "slider") input = `<div><input id="${id}" data-key="${escapeHtml(field.key)}" type="range" min="${field.min ?? 0}" max="${field.max ?? 100}" step="${field.step ?? 1}" value="${escapeHtml(value ?? field.defaultValue ?? field.min ?? 0)}"><small id="${id}-value">${escapeHtml(value ?? field.defaultValue ?? field.min ?? 0)}</small></div>`;
   else if (field.type === "number") input = `<input id="${id}" data-key="${escapeHtml(field.key)}" type="number" ${field.min != null ? `min="${field.min}"` : ""} ${field.max != null ? `max="${field.max}"` : ""} ${field.step != null ? `step="${field.step}"` : ""} value="${escapeHtml(value ?? field.defaultValue ?? "")}">`;
   else if (isFileField(field)) {
-    const acceptMap = { image: "image/*", video: "video/*", audio: "audio/*", gallery: "image/*", file: "*/*" };
+    const acceptMap = { image: "image/*", video: "video/*", audio: "audio/*", gallery: "image/*,video/*", file: "*/*" };
     const accept = (field.fileTypes || []).map((item) => ({ image: "image/*", video: "video/*", audio: "audio/*" }[item] || item)).filter(Boolean);
     const hasMultiple = field.multiple === true || field.type === "gallery";
     const existing = normalizeSelectedFiles(value);
@@ -845,6 +847,7 @@ async function uploadFile(file, host, apiPrefix, headers, signal) {
         orig_name: first?.orig_name || filename,
         size: Number(first?.size || file?.size || blob.size || 0),
         mime_type: first?.mime_type || file?.type || blob.type || "application/octet-stream",
+        meta: first?.meta || { _type: "gradio.FileData" },
       };
     } catch (error) {
       lastError = error;
@@ -853,7 +856,20 @@ async function uploadFile(file, host, apiPrefix, headers, signal) {
   }
   throw lastError || new Error("Could not upload file input.");
 }
-async function prepareGradioJob(job, model, endpoint, headers, signal) {
+function batchAttachmentKey(job, field, index, file) {
+  if (!job.batchId) return "";
+  return [job.batchId, field.key, index, file.name || "", file.size || 0, file.type || "", file.lastModified || 0].join("|");
+}
+async function cachedUploadFile(file, host, apiPrefix, headers, signal, cache, job, field, index) {
+  const key = batchAttachmentKey(job, field, index, file);
+  if (!key) return uploadFile(file, host, apiPrefix, headers, signal);
+  if (!cache.has(key)) {
+    const pending = uploadFile(file, host, apiPrefix, headers, signal).catch((error) => { cache.delete(key); throw error; });
+    cache.set(key, pending);
+  }
+  return cache.get(key);
+}
+async function prepareGradioJob(job, model, endpoint, headers, signal, uploadCache = new Map()) {
   if (job.remoteEventId) return { job, model, endpoint, headers, prefix: model.apiPrefix || "/gradio_api", api: encodeURIComponent(endpoint.apiName), sessionHash: Math.random().toString(36).slice(2, 12) };
   if (/^load_example(?:_(?:input|output))?(?:_\d+)?$/i.test(endpoint.apiName)) {
     throw new Error("This Space endpoint only loads a Gradio example; choose its inference endpoint.");
@@ -870,9 +886,11 @@ async function prepareGradioJob(job, model, endpoint, headers, signal) {
     if (isFileField(field)) {
       const selected = normalizeSelectedFiles(files.get(field.key));
       if (selected.length) {
-        const uploaded = await Promise.all(selected.map((file) => uploadFile(file, model.host, prefix, headers, signal)));
+        const uploaded = await Promise.all(selected.map((file, index) => cachedUploadFile(file, model.host, prefix, headers, signal, uploadCache, job, field, index)));
         if (field.type === "gallery") {
-          value = uploaded.map((imageFile) => ({ image: imageFile, caption: null }));
+          value = uploaded.map((mediaFile) => mediaFile.mime_type?.startsWith("video/")
+            ? { video: mediaFile, caption: null }
+            : { image: mediaFile, caption: null });
         } else if (field.multiple === true) {
           value = uploaded;
         } else {
@@ -1071,11 +1089,11 @@ async function runQueue() {
       const freshJobs = batch.filter((job) => !job.remoteEventId);
       if (freshJobs.length && isZeroGpuSpace(model) && (model.private === true || model.sendToken === true) && batch[0].accountId && accountTokens.has(batch[0].accountId)) {
         const quota = await refreshZeroGpuQuota(batch[0].accountId, true);
-        if (quota && quota.remaining <= 0) {
+        if (quota && (quota.remaining <= 0 || quota.runs?.remaining === 0)) {
           for (const job of freshJobs) {
             job.status = "paused";
             job.phase = "";
-            job.error = "The selected account has no ZeroGPU GPU-seconds remaining. Refresh the quota after its reset, then retry.";
+            job.error = "The selected account has no ZeroGPU GPU-seconds or run slots remaining. Refresh the quota after its reset, then retry.";
             job.updatedAt = Date.now();
           }
           // A remote event is already submitted and consumes no new quota by resuming its result stream.
@@ -1087,6 +1105,7 @@ async function runQueue() {
       }
 
       const entries = [];
+      const batchUploadCache = new Map();
       for (const job of batch) {
         const endpoint = endpointFor(model, job.apiName, false);
         if (!endpoint) {
@@ -1137,7 +1156,7 @@ async function runQueue() {
           const index = uploadCursor++;
           const entry = entries[index];
           try {
-            const prepared = await prepareGradioJob(entry.job, { ...model, host }, entry.endpoint, entry.headers, entry.timer.signal);
+            const prepared = await prepareGradioJob(entry.job, { ...model, host }, entry.endpoint, entry.headers, entry.timer.signal, batchUploadCache);
             entry.job.phase = entry.job.remoteEventId ? "Ready to resume remote event" : "Uploads prepared";
             entry.job.updatedAt = Date.now();
             updateVisibleJobPhase(entry.job);
