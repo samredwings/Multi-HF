@@ -794,12 +794,36 @@ function openNewProfile(existing = null) {
   openNewJob(state.models[0].id);
   ping("In the job form, enable ‘Save these settings as a reusable profile’ before adding it.");
 }
+function renderJobInputs(job, model) {
+  const endpoint = endpointFor(model, job.apiName, false);
+  if (!endpoint) return '<div class="panel"><div class="panel-body">The saved endpoint schema is no longer available.</div></div>';
+  const rows = endpoint.fields.filter((field) => !field.hidden).map((field) => {
+    const value = job.values?.[field.key];
+    let display;
+    if (isFileField(field)) {
+      const files = normalizeSelectedFiles(value);
+      display = files.length ? files.map((file) => (file.name || "Attachment") + (file.size ? " · " + formatBytes(file.size) : "")).join("\n") : "No file attached";
+    } else if (value == null || value === "") display = "—";
+    else if (typeof value === "object") { try { display = JSON.stringify(value, null, 2); } catch { display = "[structured value]"; } }
+    else display = String(value);
+    display = String(display).slice(0, 4000);
+    return '<div class="job-input-row"><strong>' + escapeHtml(field.label || field.key) + '</strong><pre>' + escapeHtml(display) + '</pre></div>';
+  }).join("");
+  return '<div class="section-head"><div><h2>Submitted inputs</h2><p>Exact parameter values and attachment names saved with this queued job.</p></div></div><div class="panel job-inputs">' + (rows || '<div class="panel-body muted">No visible input fields.</div>') + '</div>';
+}
+function formatBytes(bytes) {
+  const size = Number(bytes) || 0;
+  if (size < 1024) return size + " B";
+  if (size < 1024 * 1024) return (size / 1024).toFixed(1) + " KB";
+  return (size / (1024 * 1024)).toFixed(1) + " MB";
+}
 function openJobDetails(jobId) {
   const job = state.jobs.find((item) => item.id === jobId); if (!job) return;
   const model = getModel(job.modelId);
   const result = Array.isArray(job.result) ? job.result : [];
   showDialog(`${dialogHeader(job.name || "Generation job", `${model?.title || job.modelId} · /${job.apiName}`)}
     <div class="field-grid"><div><div class="label">Status</div><p>${statusBadge(job.status)}</p></div><div><div class="label">Current phase</div><p class="card-meta">${escapeHtml(job.phase || "—")}</p></div><div><div class="label">Last updated</div><p class="card-meta">${escapeHtml(fmtDate(job.updatedAt))}</p></div><div class="field full"><label>Error / event details</label><div class="panel-body" style="border:1px solid var(--line);border-radius:8px;white-space:pre-wrap;word-break:break-word">${escapeHtml(job.error || "No error recorded.")}</div></div></div>
+    ${renderJobInputs(job, model)}
     <div class="section-head"><div><h2>Output gallery</h2><p>${result.length} normalized output item${result.length === 1 ? "" : "s"}</p></div></div>${renderResults(result)}
     <div class="form-actions"><button class="button" type="button" data-close>Close</button>${job.status === "paused" && job.remoteEventId ? `<button class="button button-primary" id="detail-resume">Resume remote event</button>` : ""}${["failed", "paused"].includes(job.status) ? `<button class="button" id="detail-retry">Retry as new request</button>` : ""}<button class="button" id="detail-clone">Clone job</button></div>`);
   document.querySelector("#detail-resume")?.addEventListener("click", () => { if (!job.remoteEventId) return; job.status = "retry"; job.error = ""; job.phase = "Reconnecting to submitted event"; job.updatedAt = Date.now(); queueHalted = false; saveState(); dialog.close(); currentTab = "queue"; render(); runQueue(); });
