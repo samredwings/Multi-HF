@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseSpaceInput, parseSpaceConfig, taskFromEndpoints, classifyFailure, holdFor, normalizeOutputs, normalizeHost, normalizeGradioVersion, normalizeSpaceFramework } from "../src/lib/core.js";
+import { parseSpaceInput, parseSpaceConfig, taskFromEndpoints, classifyFailure, holdFor, normalizeOutputs, normalizeHost, normalizeGradioVersion, normalizeSpaceFramework, nextQueueBatch, normalizeZeroGpuQuota } from "../src/lib/core.js";
 
 test("parses accepted Space identifiers and rejects arbitrary hosts", () => {
   assert.deepEqual(parseSpaceInput("owner/space-name"), { id: "owner/space-name", host: null });
@@ -107,8 +107,7 @@ test("maps Gradio gallery and multiple-file inputs for batch jobs", () => {
   assert.equal(parsed.endpoints[0].fields[2].multiple, false);
 });
 
-test("queue batching preserves order while grouping consecutive Space/account work", async () => {
-  const { nextQueueBatch, normalizeZeroGpuQuota } = await import("../src/lib/core.js");
+test("queue batching groups the same Space and account while preserving batch order", () => {
   const jobs = [
     { id: "a1", modelId: "space/a", accountId: "acc1", status: "ready", createdAt: 1 },
     { id: "b1", modelId: "space/b", accountId: "acc1", status: "ready", createdAt: 2 },
@@ -117,8 +116,11 @@ test("queue batching preserves order while grouping consecutive Space/account wo
     { id: "done", modelId: "space/a", accountId: "acc1", status: "done", createdAt: 0 }
   ];
   assert.deepEqual(nextQueueBatch(jobs).map((job) => job.id), ["a1", "a2"]);
-  assert.deepEqual(normalizeZeroGpuQuota({ base: 300, remaining: 121, resets_at: "2030-01-01T00:00:00Z", overquota_used: 0 }), {
-    base: 300, remaining: 121, resetsAt: "2030-01-01T00:00:00Z", overquotaUsed: 0
+  assert.deepEqual(nextQueueBatch(jobs, false).map((job) => job.id), ["a1"]);
+  assert.deepEqual(normalizeZeroGpuQuota({ base: 300, current: 121, resetsAt: "2030-01-01T00:00:00Z", overquotaUsed: 0, runs: { used: 2, limit: 5, remaining: 3 } }), {
+    base: 300, remaining: 121, resetsAt: "2030-01-01T00:00:00Z", overquotaUsed: 0,
+    runs: { used: 2, limit: 5, remaining: 3, resetsAt: null }
   });
+  assert.deepEqual(normalizeZeroGpuQuota({ base: 300, remaining: 121, resets_at: "2030-01-01T00:00:00Z", overquota_used: 0 }).remaining, 121);
   assert.throws(() => normalizeZeroGpuQuota({ remaining: "unknown" }), /invalid ZeroGPU quota/i);
 });
