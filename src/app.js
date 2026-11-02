@@ -8,7 +8,10 @@ const STORAGE_KEY = "multi-hf.workspace.v1";
 const APP_VERSION = document.querySelector('meta[name="app-version"]')?.content || "dev";
 const diagnostics = createDiagnosticReporter();
 diagnostics.install(window);
-window.MultiHFDiagnostics = { importNativeEntries(entries) { return diagnostics.importNativeEntries(entries); } };
+window.MultiHFDiagnostics = {
+  importNativeEntries(entries) { return diagnostics.importNativeEntries(entries); },
+  buildReportJson() { return JSON.stringify(buildDiagnosticReport()); },
+};
 diagnostics.record("lifecycle", "Multi-HF web application started.", { version: APP_VERSION });
 const view = document.querySelector("#view");
 const dialog = document.querySelector("#dialog");
@@ -1372,28 +1375,21 @@ function exportWorkspace() {
   const blob = new Blob([JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), workspace: { ...state, accounts: state.accounts.map(({ token, connected, ...account }) => ({ ...account, connected: false })) } }, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = `multi-hf-workspace-${new Date().toISOString().slice(0, 10)}.json`; a.click(); URL.revokeObjectURL(url); ping("Workspace exported. Account tokens are excluded.");
 }
+function buildDiagnosticReport() {
+  const statusCounts = state.jobs.reduce((counts, job) => {
+    const status = String(job.status || "unknown");
+    counts[status] = (counts[status] || 0) + 1;
+    return counts;
+  }, {});
+  return diagnostics.createReport({
+    application: { name: "Multi-HF", version: APP_VERSION },
+    environment: { userAgent: navigator.userAgent || "", platform: navigator.platform || "", language: navigator.language || "", online: navigator.onLine, viewport: { width: window.innerWidth, height: window.innerHeight }, screen: { width: window.screen?.width || 0, height: window.screen?.height || 0 }, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "", serviceWorkerSupported: "serviceWorker" in navigator, indexedDbSupported: "indexedDB" in window },
+    appContext: { currentTab, queueBusy, queueHalted, modelCount: state.models.length, profileCount: state.profiles.length, jobCount: state.jobs.length, jobStatusCounts: statusCounts, connectedAccountCount: connectedAccounts().length },
+  });
+}
 function exportDiagnosticReport() {
   try {
-    const statusCounts = state.jobs.reduce((counts, job) => {
-      const status = String(job.status || "unknown");
-      counts[status] = (counts[status] || 0) + 1;
-      return counts;
-    }, {});
-    const report = diagnostics.createReport({
-      application: { name: "Multi-HF", version: APP_VERSION },
-      environment: {
-        userAgent: navigator.userAgent || "", platform: navigator.platform || "", language: navigator.language || "",
-        online: navigator.onLine, viewport: { width: window.innerWidth, height: window.innerHeight },
-        screen: { width: window.screen?.width || 0, height: window.screen?.height || 0 },
-        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
-        serviceWorkerSupported: "serviceWorker" in navigator, indexedDbSupported: "indexedDB" in window,
-        localStorageAvailable: (() => { try { const key = "__mhf_diag_test"; localStorage.setItem(key, "1"); localStorage.removeItem(key); return true; } catch { return false; } })(),
-      },
-      appContext: {
-        currentTab, queueBusy, queueHalted, modelCount: state.models.length, profileCount: state.profiles.length,
-        jobCount: state.jobs.length, jobStatusCounts: statusCounts, connectedAccountCount: connectedAccounts().length,
-      },
-    });
+    const report = buildDiagnosticReport();
     const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
