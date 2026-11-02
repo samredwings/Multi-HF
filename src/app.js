@@ -136,6 +136,11 @@ function isZeroGpuSpace(model) {
   const raw = hardwareIdentifier(model?.hardware);
   return /zero(?:[-\s]?gpu|[-\s]?(?:a10g|t4|l4|a100))/i.test(raw) || /zerogpu/i.test(JSON.stringify(model?.hardware ?? ""));
 }
+function updateVisibleJobPhase(job) {
+  if (!job?.id) return;
+  const target = [...view.querySelectorAll("[data-job-phase]")].find((node) => node.dataset.jobPhase === job.id);
+  if (target) target.textContent = job.phase || "";
+}
 function formatGpuTime(seconds) {
   const safe = Math.max(0, Math.floor(Number(seconds) || 0));
   return `${Math.floor(safe / 60)}m ${String(safe % 60).padStart(2, "0")}s`;
@@ -272,7 +277,7 @@ function renderQueue() {
 function jobRow(job) {
   const model = getModel(job.modelId);
   const title = job.name || job.values?.prompt || job.apiName || "Generation job";
-  const stateText = job.phase ? `<div class="subtext">${escapeHtml(job.phase)}</div>` : job.error ? `<div class="subtext">${escapeHtml(job.error)}</div>` : "";
+  const stateText = job.phase ? `<div class="subtext" data-job-phase="${escapeHtml(job.id)}">${escapeHtml(job.phase)}</div>` : job.error ? `<div class="subtext">${escapeHtml(job.error)}</div>` : `<div class="subtext" data-job-phase="${escapeHtml(job.id)}"></div>`;
   const action = job.status === "paused" && job.remoteEventId
     ? `<button class="button button-sm" data-job-resume="${escapeHtml(job.id)}">Resume remote</button>`
     : ["failed", "paused"].includes(job.status) ? `<button class="button button-sm" data-job-retry="${escapeHtml(job.id)}">Retry new run</button>` : "";
@@ -969,9 +974,19 @@ async function waitForGradioJob(submission, signal) {
     throw error;
   }
   return await readGradioStream(stream, (payload) => {
-    submission.job.progress = typeof payload?.progress === "number" ? payload.progress : submission.job.progress;
-    submission.job.phase = "Waiting in Space queue / receiving output";
-    submission.job.updatedAt = Date.now();
+    const job = submission.job;
+    if (typeof payload?.progress === "number") job.progress = payload.progress;
+    const rank = Number(payload?.rank ?? payload?.position ?? payload?.queue_position);
+    const eta = Number(payload?.eta);
+    if (Number.isFinite(rank) && rank >= 0) {
+      job.phase = "Space queue · position " + (Math.floor(rank) + 1) + (Number.isFinite(eta) && eta > 0 ? " · ETA " + Math.round(eta) + "s" : "");
+    } else if (typeof payload?.progress === "number") {
+      job.phase = "Generating · " + Math.round(Math.max(0, Math.min(1, payload.progress)) * 100) + "%";
+    } else {
+      job.phase = "Waiting in Space queue / receiving output";
+    }
+    job.updatedAt = Date.now();
+    updateVisibleJobPhase(job);
     saveStateSoon();
   });
 }
@@ -1001,6 +1016,7 @@ async function runQueue() {
       " (endpoint /" + job.apiName + ", token " + (tokenSent ? "sent" : "not sent") + ")";
     job.updatedAt = Date.now();
     job.phase = "";
+    updateVisibleJobPhase(job);
     if (error?.submissionUncertain) {
       // Never automatically re-submit a POST whose acceptance is unknown.
       job.status = "paused";
@@ -1124,6 +1140,7 @@ async function runQueue() {
             const prepared = await prepareGradioJob(entry.job, { ...model, host }, entry.endpoint, entry.headers, entry.timer.signal);
             entry.job.phase = entry.job.remoteEventId ? "Ready to resume remote event" : "Uploads prepared";
             entry.job.updatedAt = Date.now();
+            updateVisibleJobPhase(entry.job);
             preparedResults[index] = { ...entry, prepared };
           } catch (error) {
             const retryDelay = failJob(entry.job, error, entry.tokenSent, entry.timer.signal);
@@ -1154,6 +1171,7 @@ async function runQueue() {
         try {
           item.job.phase = "Submitting to Space queue";
           item.job.updatedAt = Date.now();
+          updateVisibleJobPhase(item.job);
           const submitted = await submitGradioJob(item.prepared, item.timer.signal);
           if (submitted.eventId) {
             item.job.remoteEventId = submitted.eventId;
@@ -1162,6 +1180,7 @@ async function runQueue() {
             item.job.phase = "Legacy synchronous endpoint";
           }
           item.job.updatedAt = Date.now();
+          updateVisibleJobPhase(item.job);
           saveState();
           monitors.push((async () => {
             try {
