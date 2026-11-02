@@ -7,3 +7,10 @@
 .space-ui-notice{margin-bottom:14px}
 .space-ui-help{line-height:1.6;margin-top:12px}
 @media(max-width:720px){.space-ui-frame{height:72vh;min-height:460px}.space-ui-header .inline-actions{width:100%}.space-ui-header .inline-actions .button{flex:1}}
+
+/* Version-matched Gradio web component surface. */
+.space-ui-mount{min-height:560px;background:#fff;color:#171717;overflow:auto}
+.space-ui-mount gradio-app{display:block;width:100%;min-height:680px}
+.space-ui-loading{min-height:420px;display:grid;place-items:center;color:#5c6675;font-size:13px;background:#f7f8fa}
+.space-ui-fallback-note{padding:0 16px 12px}
+@media(max-width:720px){.space-ui-mount{min-height:460px}.space-ui-mount gradio-app{min-height:560px}}
