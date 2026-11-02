@@ -184,3 +184,12 @@ test("unknown ZeroGPU quota limits new submissions to one while preserving remot
   assert.deepEqual(limitQueueBatchWithoutQuota(jobs).map((job) => job.id), ["already-submitted", "fresh-1"]);
   assert.deepEqual(limitQueueBatchWithoutQuota([{ id: "remote", remoteEventId: "evt-2" }]).map((job) => job.id), ["remote"]);
 });
+
+
+test("normalizes nested Hugging Face hardware metadata for ZeroGPU detection", async () => {
+  const { normalizeHardwareIdentifier } = await import("../src/lib/core.js");
+  assert.equal(normalizeHardwareIdentifier({ current: { name: "zero-a10g" }, requested: "cpu-basic" }), "zero-a10g");
+  assert.equal(normalizeHardwareIdentifier({ hardware: { flavor: "zero-gpu" } }), "zero-gpu");
+  assert.equal(normalizeHardwareIdentifier("cpu-basic"), "cpu-basic");
+  assert.equal(normalizeHardwareIdentifier({ current: null }), "");
+});
