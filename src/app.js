@@ -280,7 +280,7 @@ function renderJobs() {
   <div class="panel">${rows.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>Job</th><th>Space / API</th><th>Status</th><th>Created</th><th>Controls</th></tr></thead><tbody>${rows.map(jobRow).join("")}</tbody></table></div>` : `<div class="empty"><div class="empty-mark">◷</div><strong>No saved jobs</strong><p>Jobs you enqueue will be recorded here so you can retry or inspect them later.</p><button class="button button-primary" id="jobs-empty-add">＋ Create a job</button></div>`}</div>`;
   document.querySelector("#jobs-add")?.addEventListener("click", () => openNewJob());
   document.querySelector("#jobs-empty-add")?.addEventListener("click", () => openNewJob());
-  document.querySelector("#jobs-clear")?.addEventListener("click", () => { state.jobs = state.jobs.filter((job) => job.status !== "done"); saveState(); render(); ping("Completed jobs cleared."); });
+  document.querySelector("#jobs-clear")?.addEventListener("click", async () => { const removed = state.jobs.filter((job) => job.status === "done"); for (const job of removed) await deleteJobAttachments(job.id); state.jobs = state.jobs.filter((job) => job.status !== "done"); saveState(); render(); ping("Completed jobs and their saved attachments cleared."); });
   bindJobActions();
 }
 function ensureGradioComponent(version) {
@@ -785,8 +785,9 @@ function openJobDetails(jobId) {
   showDialog(`${dialogHeader(job.name || "Generation job", `${model?.title || job.modelId} · /${job.apiName}`)}
     <div class="field-grid"><div><div class="label">Status</div><p>${statusBadge(job.status)}</p></div><div><div class="label">Last updated</div><p class="card-meta">${escapeHtml(fmtDate(job.updatedAt))}</p></div><div class="field full"><label>Error / event details</label><div class="panel-body" style="border:1px solid var(--line);border-radius:8px;white-space:pre-wrap;word-break:break-word">${escapeHtml(job.error || "No error recorded.")}</div></div></div>
     <div class="section-head"><div><h2>Output gallery</h2><p>${result.length} normalized output item${result.length === 1 ? "" : "s"}</p></div></div>${renderResults(result)}
-    <div class="form-actions"><button class="button" type="button" data-close>Close</button>${["failed", "paused"].includes(job.status) ? `<button class="button button-primary" id="detail-retry">Retry job</button>` : ""}<button class="button" id="detail-clone">Clone job</button></div>`);
-  document.querySelector("#detail-retry")?.addEventListener("click", () => { job.status = "retry"; job.error = ""; job.attempts = 0; job.updatedAt = Date.now(); queueHalted = false; saveState(); dialog.close(); currentTab = "queue"; render(); ping("Job marked for retry."); });
+    <div class="form-actions"><button class="button" type="button" data-close>Close</button>${job.status === "paused" && job.remoteEventId ? `<button class="button button-primary" id="detail-resume">Resume remote event</button>` : ""}${["failed", "paused"].includes(job.status) ? `<button class="button" id="detail-retry">Retry as new request</button>` : ""}<button class="button" id="detail-clone">Clone job</button></div>`);
+  document.querySelector("#detail-resume")?.addEventListener("click", () => { if (!job.remoteEventId) return; job.status = "retry"; job.error = ""; job.phase = "Reconnecting to submitted event"; job.updatedAt = Date.now(); queueHalted = false; saveState(); dialog.close(); currentTab = "queue"; render(); runQueue(); });
+  document.querySelector("#detail-retry")?.addEventListener("click", () => { job.status = "retry"; job.error = ""; job.attempts = 0; job.remoteEventId = ""; job.phase = ""; job.quotaResetAt = null; job.updatedAt = Date.now(); queueHalted = false; saveState(); dialog.close(); currentTab = "queue"; render(); ping("Job marked for a fresh generation request."); });
   document.querySelector("#detail-clone")?.addEventListener("click", () => { const profile = { modelId: job.modelId, apiName: job.apiName, values: job.values, accountId: job.accountId, name: job.name, sourceJobId: job.id }; dialog.close(); openNewJob(job.modelId, profile); });
 }
 function renderResults(result) {
@@ -1156,7 +1157,6 @@ async function runQueue() {
           item.job.finishedAt = Date.now();
           item.job.updatedAt = Date.now();
           item.job.progress = 1;
-          await deleteJobAttachments(item.job.id);
           saveState();
           ping("Completed: " + (item.job.name || model.title));
         } catch (error) {
