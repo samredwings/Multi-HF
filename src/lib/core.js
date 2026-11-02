@@ -308,7 +308,7 @@ export function sanitizeWorkspace(data) {
       title: text(m.title, 200) || host, note: text(m.note, 200),
       task: ["image", "video", "other"].includes(m.task) ? m.task : "other",
       apiPrefix: /^\/[\w./-]*$/.test(m.apiPrefix ?? "") ? m.apiPrefix : "/gradio_api",
-      activeApi: endpoints.some((e) => e.apiName === m.activeApi) ? m.activeApi : endpoints[0].apiName,
+      activeApi: endpoints.some((e) => e.apiName === m.activeApi) ? m.activeApi : (endpoints[0]?.apiName || ""),
       accountId: text(m.accountId, 100), hardware: text(m.hardware, 80) || "Unknown",
       fetchedAt: finite(m.fetchedAt) ?? 0, private: m.private === true,
     });
