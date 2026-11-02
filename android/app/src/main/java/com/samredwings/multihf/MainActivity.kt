@@ -22,7 +22,19 @@ class MainActivity : ComponentActivity() {
     private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
     private val appHost = "appassets.androidplatform.net"
     private val filePicker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        val selected = if (result.resultCode == RESULT_OK) result.data?.data?.let { arrayOf(it) } else null
+        val selected = if (result.resultCode == RESULT_OK) {
+            val data = result.data
+            val uris = mutableListOf<Uri>()
+            val clip = data?.clipData
+            if (clip != null) {
+                for (index in 0 until clip.itemCount) {
+                    val uri = clip.getItemAt(index).uri
+                    if (uri !in uris) uris.add(uri)
+                }
+            }
+            data?.data?.let { if (it !in uris) uris.add(it) }
+            uris.takeIf { it.isNotEmpty() }?.toTypedArray()
+        } else null
         fileChooserCallback?.onReceiveValue(selected)
         fileChooserCallback = null
     }
@@ -78,10 +90,18 @@ class MainActivity : ComponentActivity() {
             ): Boolean {
                 this@MainActivity.fileChooserCallback?.onReceiveValue(null)
                 this@MainActivity.fileChooserCallback = filePathCallback
+                val acceptedTypes = fileChooserParams?.acceptTypes
+                    ?.flatMap { it.split(",") }
+                    ?.map { it.trim() }
+                    ?.filter { it.contains("/") && it != "*/*" }
+                    ?.distinct()
+                    .orEmpty()
+                val allowMultiple = fileChooserParams?.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE
                 val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                     addCategory(Intent.CATEGORY_OPENABLE)
-                    type = "*/*"
-                    putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "video/*", "audio/*", "application/octet-stream"))
+                    type = if (acceptedTypes.size == 1) acceptedTypes.first() else "*/*"
+                    if (acceptedTypes.size > 1) putExtra(Intent.EXTRA_MIME_TYPES, acceptedTypes.toTypedArray())
+                    putExtra(Intent.EXTRA_ALLOW_MULTIPLE, allowMultiple)
                 }
                 return try {
                     filePicker.launch(intent)
