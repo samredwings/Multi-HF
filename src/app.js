@@ -194,11 +194,13 @@ async function mountNativeGradio(mount, model, version) {
     mount.replaceChildren(app);
   } catch (error) {
     if (!mount.isConnected || currentSpaceUi !== model.id) return;
-    mountSpaceIframe(mount, model);
+    gradioScriptLoads.delete(version);
+    currentSpaceMode = "iframe";
+    renderSpaceUi(model);
     const note = document.createElement("p");
     note.className = "help space-ui-fallback-note";
     note.textContent = "Native Gradio embedding failed (" + error.message + "). Showing the hosted page in an iframe instead.";
-    mount.after(note);
+    document.querySelector("#space-ui-mount")?.after(note);
   }
 }
 function renderSpaceUi(model) {
@@ -251,7 +253,7 @@ function renderModels() {
   document.querySelector("#models-add")?.addEventListener("click", () => openAddSpace());
   document.querySelector("#models-empty-add")?.addEventListener("click", () => openAddSpace());
   document.querySelectorAll("[data-model-new]").forEach((button) => button.addEventListener("click", () => openNewJob(button.dataset.modelNew)));
-  document.querySelectorAll("[data-model-ui]").forEach((button) => button.addEventListener("click", () => { currentSpaceUi = button.dataset.modelUi; render(); }));
+  document.querySelectorAll("[data-model-ui]").forEach((button) => button.addEventListener("click", () => { currentSpaceUi = button.dataset.modelUi; currentSpaceMode = "native"; render(); }));
   document.querySelectorAll("[data-model-token]").forEach((button) => button.addEventListener("click", () => {
     const model = getModel(button.dataset.modelToken); if (!model) return;
     if (model.private) { ping("This Space is private, so your token is always sent to it."); return; }
@@ -271,7 +273,7 @@ function renderProfiles() {
   document.querySelector("#profiles-new")?.addEventListener("click", () => openNewProfile());
   document.querySelector("#profiles-empty-new")?.addEventListener("click", () => openNewProfile());
   document.querySelectorAll("[data-profile-use]").forEach((button) => button.addEventListener("click", () => { const profile = getProfile(button.dataset.profileUse); if (profile) openNewJob(profile.modelId, profile); }));
-  document.querySelectorAll("[data-profile-ui]").forEach((button) => button.addEventListener("click", () => { const profile = getProfile(button.dataset.profileUi); if (profile && getModel(profile.modelId)) { currentSpaceUi = profile.modelId; render(); } }));
+  document.querySelectorAll("[data-profile-ui]").forEach((button) => button.addEventListener("click", () => { const profile = getProfile(button.dataset.profileUi); if (profile && getModel(profile.modelId)) { currentSpaceUi = profile.modelId; currentSpaceMode = "native"; render(); } }));
   document.querySelectorAll("[data-profile-edit]").forEach((button) => button.addEventListener("click", () => { const profile = getProfile(button.dataset.profileEdit); if (profile) openNewProfile(profile); }));
   document.querySelectorAll("[data-profile-remove]").forEach((button) => button.addEventListener("click", () => { state.profiles = state.profiles.filter((p) => p.id !== button.dataset.profileRemove); saveState(); render(); ping("Profile deleted."); }));
 }
