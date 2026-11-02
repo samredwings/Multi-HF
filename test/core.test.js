@@ -148,7 +148,7 @@ test("maps complex Gradio components to structured JSON instead of invalid text 
     ],
     dependencies: [{ api_name: "generate", inputs: [1, 2, 3, 4], outputs: [5] }]
   });
-  assert.deepEqual(parsed.endpoints[0].fields.map((field) => field.type), ["json", "json", "json", "text"]);
+  assert.deepEqual(parsed.endpoints[0].fields.map((field) => field.type), ["json", "json", "json", "textarea"]);
   assert.equal(parsed.endpoints[0].fields[2].defaultValue, JSON.stringify([[1, 2]], null, 2));
 });
 
