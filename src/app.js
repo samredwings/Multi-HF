@@ -1,5 +1,5 @@
 import {
-  parseSpaceInput, normalizeHost, parseSpaceConfig, normalizeGradioVersion, normalizeSpaceFramework, taskFromEndpoints, classifyFailure, nextQueueBatch, normalizeZeroGpuQuota, admitQueueJobsByQuota, limitQueueBatchWithoutQuota,
+  parseSpaceInput, normalizeHost, parseSpaceConfig, normalizeGradioVersion, normalizeSpaceFramework, normalizeHardwareIdentifier, taskFromEndpoints, classifyFailure, nextQueueBatch, normalizeZeroGpuQuota, admitQueueJobsByQuota, limitQueueBatchWithoutQuota,
   holdFor, normalizeOutputs, safeId, tokenHeaders, persistableResult, recoverRunningJobs, sanitizeWorkspace, readGradioStream, errorMessage,
 } from "./lib/core.js";
 
@@ -127,11 +127,7 @@ function isFileField(field) {
 function fileMeta(file) {
   return { name: file.name || "upload", size: Number(file.size || 0), mime: file.type || "application/octet-stream" };
 }
-function hardwareIdentifier(value) {
-  if (typeof value === "string") return value;
-  if (!value || typeof value !== "object") return "";
-  return String(value.name || value.id || value.current || value.hardware || value.type || "");
-}
+function hardwareIdentifier(value) { return normalizeHardwareIdentifier(value); }
 function isZeroGpuSpace(model) {
   const raw = hardwareIdentifier(model?.hardware);
   return /^(?:zero|zero[-\s]?gpu)$/i.test(raw.trim()) || /zero(?:[-\s]?gpu|[-\s]?(?:a10g|t4|l4|a100))/i.test(raw) || /zero(?:[-\s]?gpu)/i.test(JSON.stringify(model?.hardware ?? ""));
@@ -612,7 +608,7 @@ async function discoverSpace(modelId = null, options = {}) {
     gradioVersion: normalizeGradioVersion(schema.gradioVersion, apiData?.sdk_version, apiData?.cardData?.sdk_version),
     framework,
     endpoints: schema.endpoints, activeApi: schema.endpoints[0]?.apiName || "", accountId, private: apiData?.private === true, sendToken: options.sendToken ?? prior?.sendToken === true,
-    hardware: apiData?.runtime?.hardware?.current || apiData?.runtime?.hardware || "Unknown", fetchedAt: Date.now(), note: name,
+    hardware: normalizeHardwareIdentifier(apiData?.runtime?.hardware?.current ?? apiData?.runtime?.hardware ?? apiData?.cardData?.hardware) || "Unknown", fetchedAt: Date.now(), note: name,
   };
   const existingIndex = state.models.findIndex((item) => item.id === id || item.host === host);
   if (existingIndex >= 0) state.models.splice(existingIndex, 1, model); else state.models.push(model);
