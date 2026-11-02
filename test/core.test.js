@@ -124,3 +124,14 @@ test("queue batching groups the same Space and account while preserving batch or
   assert.deepEqual(normalizeZeroGpuQuota({ base: 300, remaining: 121, resets_at: "2030-01-01T00:00:00Z", overquota_used: 0 }).remaining, 121);
   assert.throws(() => normalizeZeroGpuQuota({ remaining: "unknown" }), /invalid ZeroGPU quota/i);
 });
+
+
+test("ZeroGPU quota normalization accepts current API field names and run limits", () => {
+  const quota = normalizeZeroGpuQuota({
+    base: 300, current: 119, resetsAt: null, overquotaUsed: 0,
+    runs: { used: 2, limit: 5, remaining: 3, resetsAt: "2030-01-01T00:00:00Z" }
+  });
+  assert.equal(quota.remaining, 119);
+  assert.equal(quota.runs.remaining, 3);
+  assert.equal(quota.runs.resetsAt, "2030-01-01T00:00:00Z");
+});
