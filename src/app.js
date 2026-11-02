@@ -238,7 +238,7 @@ function renderSpaceUi(model) {
         <button class="button button-sm" id="space-ui-back">← Workspace</button>
         ${modeButton}
         <a class="button button-sm" href="${escapeHtml(standaloneUrl)}" target="_blank" rel="noopener noreferrer">Open standalone ↗</a>
-        <button class="button button-primary button-sm" id="space-ui-job">Create queued job</button>
+        <button class="button button-primary button-sm" id="space-ui-job" ${model.endpoints.length ? "" : "disabled title=\"This Space has no exposed API endpoint\""}>Create queued job</button>
       </div>
     </div>
     ${privateNote}
@@ -255,7 +255,7 @@ function renderSpaceUi(model) {
   else mountSpaceIframe(mount, model);
   document.querySelector("#space-ui-back")?.addEventListener("click", () => { currentSpaceUi = null; currentTab = "models"; render(); });
   document.querySelector("#space-ui-toggle")?.addEventListener("click", () => { currentSpaceMode = currentSpaceMode === "native" ? "iframe" : "native"; renderSpaceUi(model); });
-  document.querySelector("#space-ui-job")?.addEventListener("click", () => { currentSpaceUi = null; currentTab = "models"; render(); openNewJob(model.id); });
+  document.querySelector("#space-ui-job")?.addEventListener("click", () => { if (!model.endpoints.length) return; currentSpaceUi = null; currentTab = "models"; render(); openNewJob(model.id); });
 }
 function renderModels() {
   view.innerHTML = `<div class="section-head"><div><h2>Connected Spaces</h2><p>Discover Gradio endpoints from each Space's live configuration.</p></div><button class="button button-primary" id="models-add">＋ Add Space</button></div>
@@ -414,7 +414,10 @@ async function discoverSpace(modelId = null, options = {}) {
     }
   } else {
     framework = normalizeSpaceFramework(apiData?.sdk || apiData?.cardData?.sdk);
-    if (!apiData || framework === "unknown") {
+    // A direct *.hf.space URL may not reveal its Hub SDK metadata. Keep it
+    // usable as a hosted UI rather than rejecting a valid Space address.
+    if (!apiData && framework === "unknown") framework = "custom";
+    if (framework === "unknown") {
       throw new Error(`${configError?.message || "Could not read this Space's Gradio config."} If this Space is private, connect a token; if browser access is blocked, use a browser with compatible CORS permissions.`);
     }
     schema = uiOnlySchema();
