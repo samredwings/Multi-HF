@@ -481,9 +481,9 @@ function openAddSpace() {
   });
 }
 // Tokens go to huggingface.co, private Spaces, or public Spaces only after explicit per-Space opt-in.
-function authHeaders(accountId, url, privateSpace = false) {
+function authHeaders(accountId, url, privateSpace = false, allowPublicSpace = false) {
   const token = accountId ? accountTokens.get(accountId) : null;
-  return tokenHeaders(token, url, { privateSpace });
+  return tokenHeaders(token, url, { privateSpace, allowPublicSpace });
 }
 function withTimeout(ms, parent) {
   const controller = new AbortController();
@@ -555,7 +555,7 @@ async function discoverSpace(modelId = null, options = {}) {
   if (!host) throw new Error("Could not resolve the Space's public host.");
   let config; let configError;
   for (const suffix of ["/config", "/gradio_api/config"]) {
-    try { config = await fetchJson(`${host}${suffix}`, { headers: authHeaders(accountId, `${host}${suffix}`, apiData?.private === true || options.sendToken === true || prior?.sendToken === true) }, "Could not read the Gradio config"); break; }
+    try { config = await fetchJson(`${host}${suffix}`, { headers: authHeaders(accountId, `${host}${suffix}`, apiData?.private === true, options.sendToken === true || prior?.sendToken === true) }, "Could not read the Gradio config"); break; }
     catch (error) { configError = error; if (error.status !== 404 && error.status !== 405) break; }
   }
   let schema;
@@ -1084,7 +1084,7 @@ async function runQueue() {
         job.progress = 0;
         job.startedAt = job.startedAt || Date.now();
         job.updatedAt = Date.now();
-        const headers = authHeaders(job.accountId, host, model.private === true || model.sendToken === true);
+        const headers = authHeaders(job.accountId, host, model.private === true, model.sendToken === true);
         entries.push({ job, endpoint, timer, headers, tokenSent: Boolean(headers.Authorization) });
       }
       saveState();
