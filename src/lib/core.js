@@ -101,8 +101,8 @@ function typeFor(rawType, props) {
   if (type === "checkboxgroup") return "checkboxgroup";
   if (type === "dropdown") return "select";
   if (type === "radio") return "radio";
-  if (["image", "sketchpad"].includes(type)) return "image";
-  if (["imagemask", "imageeditor", "chatbot", "dataframe", "plot", "annotatedimage", "model3d", "pointcloud", "timeseries"].includes(type)) return "json";
+  if (type === "image") return "image";
+  if (["sketchpad", "imagemask", "imageeditor", "chatbot", "dataframe", "plot", "annotatedimage", "model3d", "pointcloud", "timeseries"].includes(type)) return "json";
   if (type === "video") return "video";
   if (type === "audio") return "audio";
   if (["file", "uploadbutton"].includes(type)) return "file";
