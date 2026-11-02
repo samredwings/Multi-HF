@@ -14,6 +14,8 @@ const navCount = document.querySelector("#nav-queue-count");
 const accountSummary = document.querySelector("#account-summary");
 const accountTokens = new Map();
 const jobFiles = new Map();
+const uploadObjectIds = new WeakMap();
+let nextUploadObjectId = 0;
 let currentTab = "queue";
 let currentSpaceUi = null;
 let currentSpaceMode = "native";
@@ -892,7 +894,17 @@ async function uploadFile(file, host, apiPrefix, headers, signal) {
 }
 function batchAttachmentKey(job, field, index, file) {
   if (!job.batchId) return "";
-  return [job.batchId, field.key, index, file.name || "", file.size || 0, file.type || "", file.lastModified || 0].join("|");
+  // Metadata alone is not a unique file identity: two different images can
+  // share a name, size, MIME type, and timestamp. Reuse an upload only when
+  // the exact same Blob object is shared by repeat jobs in this browser session.
+  const blob = file?.blob || file;
+  if (!blob || typeof blob !== "object") return "";
+  let identity = uploadObjectIds.get(blob);
+  if (!identity) {
+    identity = "upload-" + (++nextUploadObjectId);
+    uploadObjectIds.set(blob, identity);
+  }
+  return [job.batchId, field.key, index, identity].join("|");
 }
 async function cachedUploadFile(file, host, apiPrefix, headers, signal, cache, job, field, index) {
   const key = batchAttachmentKey(job, field, index, file);
