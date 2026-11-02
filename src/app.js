@@ -1186,6 +1186,8 @@ async function runQueue() {
           })());
         } catch (error) {
           item.retryDelay = failJob(item.job, error, item.tokenSent, item.timer.signal);
+          item.timer.done();
+          jobTimers.delete(item.job.id);
         }
       }));
       saveState();
