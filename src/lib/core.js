@@ -1,6 +1,6 @@
 const LAYOUT = new Set([
   "state", "browserstate", "button", "markdown", "html", "label", "dataset", "form",
-  "column", "row", "group", "accordion", "tabs", "tabitem", "highlightedtext", "gallery",
+  "column", "row", "group", "accordion", "tabs", "tabitem", "highlightedtext",
 ]);
 const KNOWN_HF_HOSTS = new Set(["huggingface.co", "www.huggingface.co", "hf.co"]);
 
@@ -74,6 +74,7 @@ function typeFor(rawType, props) {
   const type = String(rawType || "textbox").toLowerCase();
   if (LAYOUT.has(type)) return "skip";
   if (type === "textbox") return Number(props.lines ?? 1) > 1 || /prompt|caption|description|negative/i.test(String(props.label ?? "")) ? "textarea" : "text";
+  if (type === "gallery") return "gallery";
   if (type === "json") return "json";
   if (type === "colorpicker") return "color";
   if (type === "date") return "date";
@@ -97,6 +98,7 @@ function defaultFor(type, value, choices) {
   if (["number", "slider"].includes(type)) return typeof value === "number" ? value : (value ?? null);
   if (["select", "radio"].includes(type)) return value == null ? (choices[0]?.value ?? "") : String(value);
   if (type === "json") { try { return JSON.stringify(value ?? {}, null, 2); } catch { return "{}"; } }
+  if (type === "gallery") return Array.isArray(value) ? value : [];
   return typeof value === "string" ? value : "";
 }
 function toField(component) {
@@ -113,9 +115,11 @@ function toField(component) {
     placeholder: typeof props.placeholder === "string" ? stripEmoji(props.placeholder) : "",
     min: number(props.minimum ?? props.min), max: number(props.maximum ?? props.max), step: number(props.step),
     choices, allowCustom: props.allow_custom_value === true, defaultValue: defaultFor(type, props.value, choices),
+    multiple: type === "gallery" || props.file_count === "multiple" || props.file_count === "directory" || props.multiple === true,
+    fileTypes: Array.isArray(props.file_types) ? props.file_types.filter((item) => typeof item === "string").slice(0, 20) : [],
     passthrough: hidden && props.value && typeof props.value === "object" ? props.value : undefined,
   };
-  if (["image", "video", "audio", "file"].includes(type)) field.defaultValue = null;
+  if (["image", "video", "audio", "file", "gallery"].includes(type)) field.defaultValue = null;
   if (type === "json" && typeof props.value === "string") field.defaultValue = props.value;
   return field;
 }
@@ -234,6 +238,34 @@ export function normalizeOutputs(value, label = "Output", baseUrl = "") {
 }
 export function safeId(prefix = "id") { return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`; }
 
+/** Keep each Space/account batch together to reduce avoidable model/Space switching.
+ * The first pending job chooses the batch; jobs keep their creation order within it.
+ */
+export function nextQueueBatch(jobs) {
+  const ready = (Array.isArray(jobs) ? jobs : [])
+    .filter((job) => job && ["ready", "retry"].includes(job.status))
+    .slice()
+    .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
+  const first = ready[0];
+  if (!first) return [];
+  return ready.filter((job) => job.modelId === first.modelId && (job.accountId || "") === (first.accountId || ""));
+}
+
+/** Normalize the authenticated account's ZeroGPU quota response (GPU-seconds). */
+export function normalizeZeroGpuQuota(raw) {
+  const value = record(raw);
+  const base = Number(value?.base);
+  const remaining = Number(value?.remaining);
+  if (!Number.isFinite(base) || !Number.isFinite(remaining)) throw new Error("Hugging Face returned an invalid ZeroGPU quota response.");
+  return {
+    base: Math.max(0, base),
+    remaining: Math.max(0, remaining),
+    resetsAt: typeof value.resets_at === "string" && value.resets_at ? value.resets_at : null,
+    overquotaUsed: Number.isFinite(Number(value.overquota_used)) ? Math.max(0, Number(value.overquota_used)) : 0,
+  };
+}
+
+
 // ---------------------------------------------------------------------------
 // Token policy: a token may go to the Hub API, and to a *.hf.space host only
 // when the Hub reported that Space as private. Anyone can publish a public
@@ -254,7 +286,7 @@ export function tokenHeaders(token, url, { privateSpace = false } = {}) {
 const MAX_INLINE_STORED = 50_000;
 const JOB_STATUSES = new Set(["ready", "retry", "running", "done", "failed", "paused"]);
 const RESULT_KINDS = new Set(["image", "video", "audio", "file", "text"]);
-const FIELD_TYPES = new Set(["text", "textarea", "json", "color", "date", "time", "datetime-local", "number", "slider", "checkbox", "checkboxgroup", "select", "radio", "image", "video", "audio", "file"]);
+const FIELD_TYPES = new Set(["text", "textarea", "json", "color", "date", "time", "datetime-local", "number", "slider", "checkbox", "checkboxgroup", "select", "radio", "image", "video", "audio", "file", "gallery"]);
 const text = (value, max = 500) => (typeof value === "string" ? value.slice(0, max) : "");
 const finite = (value) => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
 
