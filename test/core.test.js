@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseSpaceInput, parseSpaceConfig, taskFromEndpoints, classifyFailure, holdFor, normalizeOutputs, normalizeHost, normalizeGradioVersion } from "../src/lib/core.js";
+import { parseSpaceInput, parseSpaceConfig, taskFromEndpoints, classifyFailure, holdFor, normalizeOutputs, normalizeHost, normalizeGradioVersion, normalizeSpaceFramework } from "../src/lib/core.js";
 
 test("parses accepted Space identifiers and rejects arbitrary hosts", () => {
   assert.deepEqual(parseSpaceInput("owner/space-name"), { id: "owner/space-name", host: null });
@@ -79,4 +79,11 @@ test("maps JSON, color, and date controls from Gradio config", () => {
   assert.equal(parsed.gradioVersion, "5.12.0");
   assert.deepEqual(parsed.endpoints[0].fields.map((field) => field.type), ["json", "color", "date"]);
   assert.equal(parsed.endpoints[0].fields[0].defaultValue, JSON.stringify({ seed: 42 }, null, 2));
+});
+
+test("identifies supported Space UI frameworks without assuming every Space is Gradio", () => {
+  assert.equal(normalizeSpaceFramework("Gradio"), "gradio");
+  assert.equal(normalizeSpaceFramework("streamlit"), "streamlit");
+  assert.equal(normalizeSpaceFramework("docker"), "docker");
+  assert.equal(normalizeSpaceFramework("unknown-runtime"), "unknown");
 });
