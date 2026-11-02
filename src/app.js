@@ -397,20 +397,27 @@ async function discoverSpace(modelId = null, options = {}) {
   }
   let schema;
   let framework;
+  const uiOnlySchema = () => ({
+    title: apiData?.cardData?.title || resolvedId || host,
+    apiPrefix: "/gradio_api",
+    gradioVersion: normalizeGradioVersion(apiData?.sdk_version, apiData?.cardData?.sdk_version),
+    endpoints: [],
+  });
   if (config) {
-    schema = parseSpaceConfig(config);
-    framework = "gradio";
+    try {
+      schema = parseSpaceConfig(config);
+      framework = "gradio";
+    } catch (error) {
+      framework = normalizeSpaceFramework(apiData?.sdk || apiData?.cardData?.sdk);
+      if (!apiData || framework === "unknown") throw error;
+      schema = uiOnlySchema();
+    }
   } else {
     framework = normalizeSpaceFramework(apiData?.sdk || apiData?.cardData?.sdk);
     if (!apiData || framework === "unknown") {
       throw new Error(`${configError?.message || "Could not read this Space's Gradio config."} If this Space is private, connect a token; if browser access is blocked, use a browser with compatible CORS permissions.`);
     }
-    schema = {
-      title: apiData?.cardData?.title || resolvedId || host,
-      apiPrefix: "/gradio_api",
-      gradioVersion: normalizeGradioVersion(apiData?.sdk_version, apiData?.cardData?.sdk_version),
-      endpoints: [],
-    };
+    schema = uiOnlySchema();
   }
   const id = resolvedId || prior?.id || host;
   const name = options.note || prior?.note || "";
