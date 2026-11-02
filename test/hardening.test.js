@@ -32,7 +32,8 @@ test("import drops models with non-hf.space hosts and their jobs", () => {
   assert.equal(ws.jobs[0].status, "paused");
   assert.equal(ws.jobs[0].remoteEventId, "event-1");
   assert.equal(ws.jobs[0].phase, "Submitted");
-  assert.equal(ws.models[0].sendToken, true);
+  assert.equal(ws.models[0].sendToken, false);
+  assert.equal(ws.models[0].private, false);
   assert.equal(ws.jobs[0].result.length, 1);
   assert.equal("token" in ws.accounts[0], false);
   assert.throws(() => sanitizeWorkspace({ models: 1 }), /not a Multi-HF/);
