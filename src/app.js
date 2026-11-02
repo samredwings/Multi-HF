@@ -141,6 +141,7 @@ function fileMeta(file) {
 }
 function hardwareIdentifier(value) { return normalizeHardwareIdentifier(value); }
 function isZeroGpuSpace(model) {
+  if (model?.zeroGpu === true) return true;
   const raw = hardwareIdentifier(model?.hardware);
   return /^(?:zero|zero[-\s]?gpu)$/i.test(raw.trim()) || /zero(?:[-\s]?gpu|[-\s]?(?:a10g|t4|l4|a100))/i.test(raw) || /zero(?:[-\s]?gpu)/i.test(JSON.stringify(model?.hardware ?? ""));
 }
@@ -498,11 +499,11 @@ function openAccountDialog(existing = null) {
 function openAddSpace() {
   const accounts = [{ id: "", label: "Public / no token" }, ...connectedAccounts().map((a) => ({ id: a.id, label: a.label }))];
   showDialog(`${dialogHeader("Discover a Hugging Face Space", "Multi-HF reads the live Gradio /config schema and builds an endpoint form.")}
-  <form id="space-form"><div class="field-grid"><div class="field full"><label for="space-ref">Space URL or owner/name</label><input id="space-ref" name="ref" required placeholder="owner/space-name or https://huggingface.co/spaces/owner/name"><small>Public Spaces work without a token. ${connectedAccounts().length ? "" : "For a private Space, first connect your token under Accounts. "}CORS or private-space permissions can still block browser access.</small></div><div class="field"><label for="space-account">Use account</label><select id="space-account" name="accountId">${accounts.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.label)}</option>`).join("")}</select></div><div class="field"><label for="space-note">Optional label</label><input id="space-note" name="note" maxlength="90" placeholder="My animation Space"></div><div class="field full"><label class="inline-actions"><input type="checkbox" name="sendToken"> <span>Send my token to this Space (some GPU/ZeroGPU Spaces need it to use your quota)</span></label><small>Off by default. The Space's owner can see any token you send, so use a fine-grained read-only token.</small></div></div><div class="form-actions"><button class="button" type="button" data-close>Cancel</button><button class="button button-primary" type="submit">Discover Space</button></div></form>`);
+  <form id="space-form"><div class="field-grid"><div class="field full"><label for="space-ref">Space URL or owner/name</label><input id="space-ref" name="ref" required placeholder="owner/space-name or https://huggingface.co/spaces/owner/name"><small>Public Spaces work without a token. ${connectedAccounts().length ? "" : "For a private Space, first connect your token under Accounts. "}CORS or private-space permissions can still block browser access.</small></div><div class="field"><label for="space-account">Use account</label><select id="space-account" name="accountId">${accounts.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.label)}</option>`).join("")}</select></div><div class="field"><label for="space-note">Optional label</label><input id="space-note" name="note" maxlength="90" placeholder="My animation Space"></div><div class="field full"><label class="inline-actions"><input type="checkbox" name="sendToken"> <span>Send my token to this Space (some GPU/ZeroGPU Spaces need it to use your quota)</span></label><small>Off by default. The Space's owner can see any token you send, so use a fine-grained read-only token.</small></div><div class="field full"><label class="inline-actions"><input type="checkbox" name="zeroGpu"> <span>This Space uses ZeroGPU (quota-aware scheduling)</span></label><small>Usually detected automatically from hardware metadata. Enable this if the Space uses ZeroGPU but Hugging Face reports its hardware as unknown; this makes Multi-HF pace submissions conservatively.</small></div></div><div class="form-actions"><button class="button" type="button" data-close>Cancel</button><button class="button button-primary" type="submit">Discover Space</button></div></form>`);
   document.querySelector("#space-form").addEventListener("submit", async (event) => {
-    event.preventDefault(); const form = new FormData(event.currentTarget); const ref = String(form.get("ref") || "").trim(); const accountId = String(form.get("accountId") || ""); const note = String(form.get("note") || "").trim(); const sendToken = form.get("sendToken") === "on" && Boolean(accountId);
+    event.preventDefault(); const form = new FormData(event.currentTarget); const ref = String(form.get("ref") || "").trim(); const accountId = String(form.get("accountId") || ""); const note = String(form.get("note") || "").trim(); const sendToken = form.get("sendToken") === "on" && Boolean(accountId); const zeroGpu = form.get("zeroGpu") === "on";
     const submit = event.currentTarget.querySelector("[type=submit]"); submit.disabled = true; submit.textContent = "Discovering…";
-    try { await discoverSpace(null, { ref, accountId, note, sendToken }); dialog.close(); }
+    try { await discoverSpace(null, { ref, accountId, note, sendToken, zeroGpu }); dialog.close(); }
     catch (error) { submit.disabled = false; submit.textContent = "Discover Space"; dialogError(error.message || "Space discovery failed."); }
   });
 }
@@ -619,7 +620,7 @@ async function discoverSpace(modelId = null, options = {}) {
     task: taskFromEndpoints(schema.endpoints), apiPrefix: schema.apiPrefix,
     gradioVersion: normalizeGradioVersion(schema.gradioVersion, apiData?.sdk_version, apiData?.cardData?.sdk_version),
     framework,
-    endpoints: schema.endpoints, activeApi: schema.endpoints[0]?.apiName || "", accountId, private: apiData?.private === true, sendToken: options.sendToken ?? prior?.sendToken === true,
+    endpoints: schema.endpoints, activeApi: schema.endpoints[0]?.apiName || "", accountId, private: apiData?.private === true, sendToken: options.sendToken ?? prior?.sendToken === true, zeroGpu: options.zeroGpu ?? prior?.zeroGpu === true,
     hardware: normalizeHardwareIdentifier(apiData?.runtime?.hardware?.current ?? apiData?.runtime?.hardware ?? apiData?.cardData?.hardware) || "Unknown", fetchedAt: Date.now(), note: name,
   };
   const existingIndex = state.models.findIndex((item) => item.id === id || item.host === host);
