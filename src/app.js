@@ -116,6 +116,7 @@ async function deleteJobAttachments(jobId) {
 }
 async function getJobAttachments(job) {
   if (jobFiles.has(job.id)) return jobFiles.get(job.id);
+  if (!(job.files || []).length) { const empty = new Map(); jobFiles.set(job.id, empty); return empty; }
   const files = await loadJobAttachments(job.id);
   jobFiles.set(job.id, files);
   return files;
@@ -504,6 +505,37 @@ async function fetchJson(url, options = {}, failureMessage = "Request failed") {
   }
   return response.json();
 }
+async function refreshZeroGpuQuota(accountId = "", quiet = false) {
+  if (!accountId || !accountTokens.has(accountId) || !getAccount(accountId)?.enabled) {
+    quotaState = { data: null, error: "Connect an enabled Hugging Face account to read its ZeroGPU allowance.", loading: false, accountId, checkedAt: 0 };
+    if (!quiet) render();
+    return null;
+  }
+  quotaState = { ...quotaState, loading: true, accountId, error: "" };
+  if (!quiet) render();
+  try {
+    const url = "https://huggingface.co/api/spaces/zero-gpu/quota";
+    const raw = await fetchJson(url, { headers: authHeaders(accountId, url) }, "ZeroGPU quota request failed");
+    const data = normalizeZeroGpuQuota(raw);
+    quotaState = { data, error: "", loading: false, accountId, checkedAt: Date.now() };
+    return data;
+  } catch (error) {
+    const message = error.message || String(error);
+    const permission = /401|403|permission|billing|unauthorized/i.test(message);
+    quotaState = {
+      data: null,
+      error: permission
+        ? "This token cannot read billing usage. Enable “Billing → Read billing usage and payment method status” in its fine-grained permissions, then refresh."
+        : "Could not read ZeroGPU quota: " + message,
+      loading: false,
+      accountId,
+      checkedAt: Date.now(),
+    };
+    return null;
+  } finally {
+    if (!quiet && currentTab === "queue") render();
+  }
+}
 async function discoverSpace(modelId = null, options = {}) {
   clearNotice();
   const prior = modelId ? getModel(modelId) : null;
@@ -738,7 +770,7 @@ function openNewJob(modelId = null, profile = null) {
       submit.textContent = "＋ Add to queue";
       dialogError(error.message || "Could not stage this generation job.");
     }
-  });;
+  });
 }
 function openNewProfile(existing = null) {
   if (existing) { openNewJob(existing.modelId, existing); return; }
