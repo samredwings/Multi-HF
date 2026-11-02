@@ -36,7 +36,7 @@ const ATTACHMENT_DB_VERSION = 1;
 function openAttachmentDb() {
   if (attachmentDbPromise) return attachmentDbPromise;
   if (!("indexedDB" in window)) return Promise.reject(new Error("This browser does not support persistent file attachments. Use a browser with IndexedDB enabled."));
-  attachmentDbPromise = new Promise((resolve, reject) => {
+  const opening = new Promise((resolve, reject) => {
     const request = indexedDB.open(ATTACHMENT_DB_NAME, ATTACHMENT_DB_VERSION);
     request.onupgradeneeded = () => {
       const db = request.result;
@@ -45,9 +45,19 @@ function openAttachmentDb() {
         store.createIndex("jobId", "jobId", { unique: false });
       }
     };
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      const db = request.result;
+      db.onversionchange = () => db.close();
+      resolve(db);
+    };
     request.onerror = () => reject(request.error || new Error("Could not open attachment storage."));
     request.onblocked = () => reject(new Error("Attachment storage is blocked by another open app tab. Close older Multi-HF tabs and retry."));
+  });
+  // Do not cache a rejected open promise forever; a transient browser storage
+  // failure or blocked tab should be recoverable after the user fixes it.
+  attachmentDbPromise = opening.catch((error) => {
+    attachmentDbPromise = null;
+    throw error;
   });
   return attachmentDbPromise;
 }
