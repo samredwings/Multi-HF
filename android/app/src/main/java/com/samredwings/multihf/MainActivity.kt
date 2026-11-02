@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.view.ViewGroup
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
+import android.webkit.ConsoleMessage
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -15,12 +16,17 @@ import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.webkit.WebViewAssetLoader
+import org.json.JSONArray
+import org.json.JSONObject
 
 class MainActivity : ComponentActivity() {
+    companion object { @Volatile private var crashHandlerInstalled = false }
     private lateinit var webView: WebView
     private lateinit var assetLoader: WebViewAssetLoader
     private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
     private val appHost = "appassets.androidplatform.net"
+    private val diagnosticsPrefs by lazy { getSharedPreferences("multi_hf_diagnostics", MODE_PRIVATE) }
+    private val diagnosticsLock = Any()
     private val filePicker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val selected = if (result.resultCode == RESULT_OK) {
             val data = result.data
@@ -41,6 +47,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        installCrashDiagnostics()
+        recordNativeDiagnostic("lifecycle", "Android activity created.")
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 if (::webView.isInitialized && webView.canGoBack()) webView.goBack() else finish()
@@ -72,6 +80,28 @@ class MainActivity : ComponentActivity() {
             override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest) =
                 assetLoader.shouldInterceptRequest(request.url)
 
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                if (Uri.parse(url ?: "").host == appHost) {
+                    val entries = nativeDiagnosticsSnapshot()
+                    view?.evaluateJavascript("window.MultiHFDiagnostics?.importNativeEntries($entries);", null)
+                }
+            }
+
+            override fun onReceivedError(view: WebView?, request: WebResourceRequest, error: android.webkit.WebResourceError) {
+                super.onReceivedError(view, request, error)
+                if (request.isForMainFrame) {
+                    recordNativeDiagnostic("webview_error", error.description?.toString() ?: "WebView main-frame load failed.", request.url.toString().substringBefore("?").substringBefore("#"))
+                }
+            }
+
+            override fun onReceivedHttpError(view: WebView?, request: WebResourceRequest, errorResponse: android.webkit.WebResourceResponse) {
+                super.onReceivedHttpError(view, request, errorResponse)
+                if (request.isForMainFrame && errorResponse.statusCode >= 400) {
+                    recordNativeDiagnostic("webview_http_error", "Main-frame HTTP ${errorResponse.statusCode} ${errorResponse.reasonPhrase ?: ""}", request.url.toString().substringBefore("?").substringBefore("#"))
+                }
+            }
+
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest): Boolean {
                 val uri = request.url
                 if (uri.host == appHost && uri.scheme == "https") return false
@@ -83,6 +113,16 @@ class MainActivity : ComponentActivity() {
             }
         }
         webView.webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(message: ConsoleMessage): Boolean {
+                val level = when (message.messageLevel()) {
+                    ConsoleMessage.MessageLevel.ERROR -> "console_error"
+                    ConsoleMessage.MessageLevel.WARNING -> "console_warning"
+                    else -> return true
+                }
+                recordNativeDiagnostic(level, message.message(), message.sourceId().substringBefore("?").substringBefore("#"), "line ${message.lineNumber()}")
+                return true
+            }
+
             override fun onShowFileChooser(
                 webView: WebView?,
                 filePathCallback: ValueCallback<Array<Uri>>?,
@@ -121,6 +161,61 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun redactDiagnosticText(value: String): String {
+        var safe = value
+        safe = Regex("""\bhf_[A-Za-z0-9]{20,}\b""").replace(safe, "[REDACTED_HF_TOKEN]")
+        safe = Regex("""(?i)\bBearer\s+[^\s"' ,;]+""").replace(safe, "Bearer [REDACTED]")
+        safe = Regex("""(?i)(authorization|access[_-]?token|refresh[_-]?token|token|secret|password|api[_-]?key)(\s*[:=]\s*["']?)[^"'\s,;&}]+""").replace(safe) { match ->
+            match.groupValues[1] + match.groupValues[2] + "[REDACTED]"
+        }
+        return safe.take(6000)
+    }
+
+    private fun recordNativeDiagnostic(level: String, message: String, source: String = "", stack: String = "") {
+        try {
+            synchronized(diagnosticsLock) {
+                val entries = try { JSONArray(diagnosticsPrefs.getString("entries", "[]") ?: "[]") }
+                    catch (_: Exception) { JSONArray() }
+                entries.put(
+                    JSONObject()
+                        .put("id", System.currentTimeMillis().toString() + "-" + entries.length())
+                        .put("timestamp", System.currentTimeMillis())
+                        .put("level", redactDiagnosticText(level))
+                        .put("message", redactDiagnosticText(message))
+                        .put("source", redactDiagnosticText(source))
+                        .put("stack", redactDiagnosticText(stack))
+                )
+                while (entries.length() > 120) entries.remove(0)
+                diagnosticsPrefs.edit().putString("entries", entries.toString()).apply()
+            }
+        } catch (_: Exception) {
+            // Diagnostics must never crash the host app.
+        }
+    }
+
+    private fun nativeDiagnosticsSnapshot(): String {
+        return synchronized(diagnosticsLock) {
+            diagnosticsPrefs.getString("entries", "[]") ?: "[]"
+        }
+    }
+
+    private fun installCrashDiagnostics() {
+        synchronized(MainActivity::class.java) {
+            if (crashHandlerInstalled) return
+            val previous = Thread.getDefaultUncaughtExceptionHandler()
+            Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+                recordNativeDiagnostic(
+                    "fatal_android_crash",
+                    "Uncaught Android exception on thread " + thread.name,
+                    "",
+                    throwable.stackTraceToString()
+                )
+                previous?.uncaughtException(thread, throwable)
+            }
+            crashHandlerInstalled = true
+        }
+    }
+
     private fun openExternal(uri: Uri) {
         try {
             startActivity(Intent(Intent.ACTION_VIEW, uri))
@@ -135,6 +230,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        recordNativeDiagnostic("lifecycle", "Android activity destroyed.")
+
         fileChooserCallback?.onReceiveValue(null)
         fileChooserCallback = null
         if (::webView.isInitialized) {

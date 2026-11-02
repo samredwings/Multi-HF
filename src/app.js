@@ -2,8 +2,14 @@ import {
   parseSpaceInput, normalizeHost, parseSpaceConfig, normalizeGradioVersion, normalizeSpaceFramework, normalizeHardwareIdentifier, taskFromEndpoints, classifyFailure, nextQueueBatch, normalizeZeroGpuQuota, admitQueueJobsByQuota, limitQueueBatchWithoutQuota,
   holdFor, normalizeOutputs, safeId, tokenHeaders, persistableResult, recoverRunningJobs, sanitizeWorkspace, readGradioStream, errorMessage,
 } from "./lib/core.js";
+import { createDiagnosticReporter } from "./lib/diagnostics.js";
 
 const STORAGE_KEY = "multi-hf.workspace.v1";
+const APP_VERSION = document.querySelector('meta[name="app-version"]')?.content || "dev";
+const diagnostics = createDiagnosticReporter();
+diagnostics.install(window);
+window.MultiHFDiagnostics = { importNativeEntries(entries) { return diagnostics.importNativeEntries(entries); } };
+diagnostics.record("lifecycle", "Multi-HF web application started.", { version: APP_VERSION });
 const view = document.querySelector("#view");
 const dialog = document.querySelector("#dialog");
 const dialogContent = document.querySelector("#dialog-content");
@@ -1086,6 +1092,7 @@ async function runQueue() {
   if (queueBusy) return;
   queueHalted = false;
   queueBusy = true;
+  diagnostics.record("queue_started", "Generation queue started.", { pendingJobs: waitingJobs().length });
   clearNotice();
   const controller = new AbortController();
   const jobTimers = new Map();
@@ -1099,6 +1106,7 @@ async function runQueue() {
     const until = holdFor(kind, message, error?.resetAt || null);
     job.error = "[" + kind.toUpperCase() + "] " + (cancelled ? "Cancelled locally; the Space may still finish an already-submitted event." : message) +
       " (endpoint /" + job.apiName + ", token " + (tokenSent ? "sent" : "not sent") + ")";
+    diagnostics.record("queue_job_failure", job.error, { jobId: job.id, apiName: job.apiName, kind, status: Number(error?.status || 0) });
     job.updatedAt = Date.now();
     job.phase = "";
     updateVisibleJobPhase(job);
@@ -1301,6 +1309,7 @@ async function runQueue() {
               const raw = await waitForGradioJob(submitted, item.timer.signal);
               item.job.result = normalizeOutputs(raw, "Output", host);
               item.job.status = "done";
+              diagnostics.record("queue_job_completed", "Generation job completed.", { jobId: item.job.id, apiName: item.job.apiName });
               item.job.error = "";
               item.job.phase = "Complete";
               item.job.remoteEventId = "";
@@ -1347,6 +1356,7 @@ async function runQueue() {
       }
     }
   } catch (error) {
+    diagnostics.captureError(error, { kind: "queue_manager" });
     showNotice("Queue manager stopped: " + (error?.message || String(error)), "error");
   } finally {
     for (const timer of jobTimers.values()) timer.done();
@@ -1361,6 +1371,42 @@ async function runQueue() {
 function exportWorkspace() {
   const blob = new Blob([JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), workspace: { ...state, accounts: state.accounts.map(({ token, connected, ...account }) => ({ ...account, connected: false })) } }, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = `multi-hf-workspace-${new Date().toISOString().slice(0, 10)}.json`; a.click(); URL.revokeObjectURL(url); ping("Workspace exported. Account tokens are excluded.");
+}
+function exportDiagnosticReport() {
+  try {
+    const statusCounts = state.jobs.reduce((counts, job) => {
+      const status = String(job.status || "unknown");
+      counts[status] = (counts[status] || 0) + 1;
+      return counts;
+    }, {});
+    const report = diagnostics.createReport({
+      application: { name: "Multi-HF", version: APP_VERSION },
+      environment: {
+        userAgent: navigator.userAgent || "", platform: navigator.platform || "", language: navigator.language || "",
+        online: navigator.onLine, viewport: { width: window.innerWidth, height: window.innerHeight },
+        screen: { width: window.screen?.width || 0, height: window.screen?.height || 0 },
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
+        serviceWorkerSupported: "serviceWorker" in navigator, indexedDbSupported: "indexedDB" in window,
+        localStorageAvailable: (() => { try { const key = "__mhf_diag_test"; localStorage.setItem(key, "1"); localStorage.removeItem(key); return true; } catch { return false; } })(),
+      },
+      appContext: {
+        currentTab, queueBusy, queueHalted, modelCount: state.models.length, profileCount: state.profiles.length,
+        jobCount: state.jobs.length, jobStatusCounts: statusCounts, connectedAccountCount: connectedAccounts().length,
+      },
+    });
+    const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "multi-hf-debug-report-" + new Date().toISOString().replace(/[:.]/g, "-") + ".json";
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    diagnostics.record("diagnostics_exported", "Full diagnostic report exported.");
+    ping("Debug report exported. Review it for private details before sharing.");
+  } catch (error) {
+    diagnostics.captureError(error, { kind: "diagnostic_export" });
+    showNotice("Could not export the debug report: " + (error?.message || String(error)), "error");
+  }
 }
 async function importWorkspace(data) {
   if (queueBusy) {
@@ -1385,6 +1431,7 @@ async function importWorkspace(data) {
 document.querySelectorAll("[data-tab]").forEach((button) => button.addEventListener("click", () => { currentSpaceUi = null; currentTab = button.dataset.tab; render(); }));
 document.querySelector("#quick-add").addEventListener("click", () => openNewJob());
 document.querySelector("#export-data").addEventListener("click", exportWorkspace);
+document.querySelector("#export-debug-report").addEventListener("click", exportDiagnosticReport);
 document.querySelector("#import-data").addEventListener("click", () => document.querySelector("#import-file").click());
 document.querySelector("#import-file").addEventListener("change", async (event) => {
   const file = event.target.files?.[0]; if (!file) return;

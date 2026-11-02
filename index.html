@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#10141b">
   <meta name="description" content="A local-first workbench for Hugging Face Spaces, generation profiles, and queues.">
+  <meta name="app-version" content="0.1.7">
   <link rel="manifest" href="./manifest.webmanifest">
   <link rel="icon" href="./favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="./src/styles.css">
@@ -30,7 +31,7 @@
       </div>
     </aside>
     <main class="main">
-      <header class="topbar"><div><div class="eyebrow">HUGGING FACE WORKSPACE</div><h1 id="page-title">Generation queue</h1></div><div class="top-actions"><span class="connection"><span class="live-dot"></span><span id="account-summary">No account connected</span></span><button class="button button-primary" id="quick-add">＋ New job</button></div></header>
+      <header class="topbar"><div><div class="eyebrow">HUGGING FACE WORKSPACE</div><h1 id="page-title">Generation queue</h1></div><div class="top-actions"><span class="connection"><span class="live-dot"></span><span id="account-summary">No account connected</span></span><button class="button button-quiet" id="export-debug-report" title="Export full diagnostic report">Debug report</button><button class="button button-primary" id="quick-add">＋ New job</button></div></header>
       <section id="notice" class="notice" hidden></section>
       <section id="view" aria-live="polite"></section>
       <footer class="footer"><span>Multi-HF · Local-first Gradio queue manager</span><span>Tokens are session-only and are never saved to browser storage.</span></footer>
