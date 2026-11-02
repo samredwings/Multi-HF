@@ -257,6 +257,27 @@ export function nextQueueBatch(jobs, batchMode = true) {
   return ready.filter((job) => job.modelId === first.modelId && (job.accountId || "") === (first.accountId || ""));
 }
 
+/** Admit only jobs whose estimated ZeroGPU reservations fit the live account quota. */
+export function admitQueueJobsByQuota(jobs, quota) {
+  const admitted = [];
+  const held = [];
+  let remainingSeconds = Math.max(0, Number(quota?.remaining) || 0);
+  let remainingRuns = quota?.runs ? Math.max(0, Number(quota.runs.remaining) || 0) : Number.POSITIVE_INFINITY;
+  let reservedSeconds = 0;
+  for (const job of Array.isArray(jobs) ? jobs : []) {
+    const requestedSeconds = Math.max(1, Math.min(600, Number(job?.reservationSeconds) || 60));
+    if (requestedSeconds <= remainingSeconds && remainingRuns > 0) {
+      admitted.push(job);
+      remainingSeconds -= requestedSeconds;
+      remainingRuns -= 1;
+      reservedSeconds += requestedSeconds;
+    } else {
+      held.push({ job, requestedSeconds });
+    }
+  }
+  return { admitted, held, reservedSeconds, remainingSeconds, remainingRuns };
+}
+
 /** Normalize /api/spaces/zero-gpu/quota (GPU-seconds). HTTP uses current/resetsAt. */
 export function normalizeZeroGpuQuota(raw) {
   const value = record(raw);
