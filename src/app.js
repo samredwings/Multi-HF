@@ -900,8 +900,7 @@ async function submitGradioJob(prepared, signal) {
       signal,
     });
   } catch (error) {
-    if (isAbortError(error)) throw error;
-    const uncertain = new Error("The submission connection failed before an event ID was returned. The Space may or may not have accepted it; check the hosted Space queue before retrying to avoid duplicate GPU work. " + error.message);
+    const uncertain = new Error("The submission was interrupted before an event ID was returned. The Space may or may not have accepted it; check the hosted Space queue before retrying to avoid duplicate GPU work. " + (error?.message || String(error)));
     uncertain.submissionUncertain = true;
     throw uncertain;
   }
@@ -923,6 +922,12 @@ async function submitGradioJob(prepared, signal) {
     if (output?.error) throw new Error(typeof output.error === "string" ? output.error : JSON.stringify(output.error));
     return { ...prepared, immediateData: output?.data ?? output?.output?.data ?? output };
   }
+  if (!response.ok) {
+    const message = (await response.text()).slice(0, 700);
+    const error = new Error(message || ("Generation submission failed (HTTP " + response.status + ")"));
+    error.status = response.status;
+    throw error;
+  }
   let initial = {};
   try { initial = await response.json(); }
   catch {
@@ -930,8 +935,8 @@ async function submitGradioJob(prepared, signal) {
     error.status = response.status;
     throw error;
   }
-  if (!response.ok || initial?.error || initial?.success === false) {
-    const error = new Error(errorMessage(initial) || ("Generation submission failed (HTTP " + response.status + ")"));
+  if (initial?.error || initial?.success === false) {
+    const error = new Error(errorMessage(initial) || "Gradio rejected the generation request.");
     error.status = response.status;
     throw error;
   }
@@ -984,14 +989,14 @@ async function runQueue() {
       " (endpoint /" + job.apiName + ", token " + (tokenSent ? "sent" : "not sent") + ")";
     job.updatedAt = Date.now();
     job.phase = "";
-    if (cancelled) {
-      job.status = "paused";
-      queueHalted = true;
-    } else if (error?.submissionUncertain) {
+    if (error?.submissionUncertain) {
       // Never automatically re-submit a POST whose acceptance is unknown.
       job.status = "paused";
       queueHalted = true;
       showNotice("The Space may have accepted a request but the browser did not receive its event ID. Check the Space queue before starting a fresh run.", "error");
+    } else if (cancelled) {
+      job.status = "paused";
+      queueHalted = true;
     } else if (kind === "quota") {
       job.status = "paused";
       job.quotaResetAt = until;
