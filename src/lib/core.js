@@ -415,7 +415,7 @@ export function sanitizeWorkspace(data) {
       apiPrefix: /^\/[\w./-]*$/.test(m.apiPrefix ?? "") ? m.apiPrefix : "/gradio_api",
       activeApi: endpoints.some((e) => e.apiName === m.activeApi) ? m.activeApi : (endpoints[0]?.apiName || ""),
       accountId: text(m.accountId, 100), hardware: normalizeHardwareIdentifier(m.hardware) || "Unknown",
-      fetchedAt: finite(m.fetchedAt) ?? 0, private: false, sendToken: false,
+      fetchedAt: finite(m.fetchedAt) ?? 0, private: false, sendToken: false, zeroGpu: m.zeroGpu === true,
     });
   }
   const known = new Set(models.map((m) => m.id));
