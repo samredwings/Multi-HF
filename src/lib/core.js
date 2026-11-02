@@ -257,6 +257,16 @@ export function nextQueueBatch(jobs, batchMode = true) {
   return ready.filter((job) => job.modelId === first.modelId && (job.accountId || "") === (first.accountId || ""));
 }
 
+/** When quota cannot be inspected, submit at most one new ZeroGPU request.
+ * Already-submitted events can be resumed because they do not create a new reservation.
+ */
+export function limitQueueBatchWithoutQuota(jobs) {
+  const list = Array.isArray(jobs) ? jobs : [];
+  const firstFresh = list.find((job) => job && !job.remoteEventId);
+  if (!firstFresh) return list.slice();
+  return list.filter((job) => job?.remoteEventId || job?.id === firstFresh.id);
+}
+
 /** Admit only jobs whose estimated ZeroGPU reservations fit the live account quota. */
 export function admitQueueJobsByQuota(jobs, quota) {
   const admitted = [];
