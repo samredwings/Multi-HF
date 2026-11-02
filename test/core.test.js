@@ -193,3 +193,17 @@ test("normalizes nested Hugging Face hardware metadata for ZeroGPU detection", a
   assert.equal(normalizeHardwareIdentifier("cpu-basic"), "cpu-basic");
   assert.equal(normalizeHardwareIdentifier({ current: null }), "");
 });
+
+
+test("maps Sketchpad and image editor inputs to their structured editor payloads", () => {
+  const parsed = parseSpaceConfig({
+    components: [
+      { id: 1, type: "sketchpad", props: { label: "Draw a mask" } },
+      { id: 2, type: "imageeditor", props: { label: "Edit reference" } },
+      { id: 3, type: "image", props: { label: "Source image" } },
+      { id: 4, type: "image", props: { label: "Output" } }
+    ],
+    dependencies: [{ api_name: "generate", inputs: [1, 2, 3], outputs: [4] }]
+  });
+  assert.deepEqual(parsed.endpoints[0].fields.map((field) => field.type), ["json", "json", "image"]);
+});
