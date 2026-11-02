@@ -41,6 +41,6 @@ npm run preview
 
 ## Full debug reports
 
-The app includes a local diagnostic recorder for JavaScript exceptions, unhandled promise rejections, console warnings/errors, failed network requests, HTTP error responses, queue failures, and Android WebView console/fatal-crash records. Use **Debug report** in the top bar to export a JSON report for troubleshooting.
+The app includes a local diagnostic recorder for JavaScript exceptions, unhandled promise rejections, console warnings/errors, failed network requests, HTTP error responses, queue failures, and Android WebView console/fatal-crash records. Use **Debug report** in a browser, or **Save full debug report** in the Android app, to export a JSON report for troubleshooting.
 
 Reports are stored locally in a bounded rolling log. Hugging Face tokens, bearer credentials, JWTs, and credential-like fields are redacted; prompts, submitted input payloads, uploaded files, and workspace contents are excluded. Structured server error details are retained where safe; unstructured response bodies are omitted because they may echo submitted content. Review the exported report before sharing it.

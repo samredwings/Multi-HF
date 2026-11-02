@@ -72,11 +72,12 @@ function safeErrorBody(raw) {
 function describeArgument(value) {
   if (value instanceof Error) return value.stack || value.message || value.name;
   if (typeof value === "string") return value;
-  try { return JSON.stringify(value); } catch { return String(value); }
+  try { return JSON.stringify(safeValue(value)); } catch { return sanitizeDiagnosticText(String(value)); }
 }
 
 export function createDiagnosticReporter(options = {}) {
-  const storage = options.storage ?? globalThis.localStorage;
+  let storage = options.storage;
+  if (storage === undefined) { try { storage = globalThis.localStorage; } catch { storage = null; } }
   const now = options.now ?? (() => Date.now());
   const maxEntries = Math.max(20, Math.min(1000, Number(options.maxEntries) || DEFAULT_LIMIT));
   let entries = [];

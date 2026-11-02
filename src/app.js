@@ -10,7 +10,7 @@ const diagnostics = createDiagnosticReporter();
 diagnostics.install(window);
 window.MultiHFDiagnostics = {
   importNativeEntries(entries) { return diagnostics.importNativeEntries(entries); },
-  buildReportJson() { return JSON.stringify(buildDiagnosticReport()); },
+  buildReportJson() { diagnostics.record("diagnostics_exported", "Full diagnostic report exported."); return JSON.stringify(buildDiagnosticReport()); },
 };
 diagnostics.record("lifecycle", "Multi-HF web application started.", { version: APP_VERSION });
 const view = document.querySelector("#view");
