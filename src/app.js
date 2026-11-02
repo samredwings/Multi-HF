@@ -134,7 +134,7 @@ function hardwareIdentifier(value) {
 }
 function isZeroGpuSpace(model) {
   const raw = hardwareIdentifier(model?.hardware);
-  return /zero(?:[-\\s]?gpu|[-\\s]?(?:a10g|t4|l4|a100))/i.test(raw) || /zerogpu/i.test(JSON.stringify(model?.hardware ?? ""));
+  return /zero(?:[-\s]?gpu|[-\s]?(?:a10g|t4|l4|a100))/i.test(raw) || /zerogpu/i.test(JSON.stringify(model?.hardware ?? ""));
 }
 function formatGpuTime(seconds) {
   const safe = Math.max(0, Math.floor(Number(seconds) || 0));
