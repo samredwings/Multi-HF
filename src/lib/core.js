@@ -414,7 +414,7 @@ export function sanitizeWorkspace(data) {
       task: ["image", "video", "other"].includes(m.task) ? m.task : "other",
       apiPrefix: /^\/[\w./-]*$/.test(m.apiPrefix ?? "") ? m.apiPrefix : "/gradio_api",
       activeApi: endpoints.some((e) => e.apiName === m.activeApi) ? m.activeApi : (endpoints[0]?.apiName || ""),
-      accountId: text(m.accountId, 100), hardware: text(m.hardware, 80) || "Unknown",
+      accountId: text(m.accountId, 100), hardware: normalizeHardwareIdentifier(m.hardware) || "Unknown",
       fetchedAt: finite(m.fetchedAt) ?? 0, private: false, sendToken: false,
     });
   }
