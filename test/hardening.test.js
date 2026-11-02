@@ -55,3 +55,16 @@ test("SSE error with a plain-string payload keeps its text so quota is classifie
   await assert.rejects(readGradioStream(stream("event: error\ndata: null\n\n")), /no details/);
   await assert.rejects(readGradioStream(stream("event: heartbeat\ndata: null\n\n")), /ended before/);
 });
+
+test("workspace import keeps UI-only Spaces with a recognized framework", () => {
+  const imported = sanitizeWorkspace({
+    models: [
+      { id: "demo/streamlit", host: "https://demo-streamlit.hf.space", framework: "streamlit", endpoints: [] },
+      { id: "demo/gradio-ui", host: "https://demo-gradio.hf.space", framework: "gradio", endpoints: [], gradioVersion: "5.12.0" },
+      { id: "unknown/ui", host: "https://unknown-ui.hf.space", framework: "unknown", endpoints: [] }
+    ],
+    profiles: [], jobs: [], accounts: []
+  });
+  assert.deepEqual(imported.models.map((item) => item.framework), ["streamlit", "gradio"]);
+  assert.equal(imported.models[1].activeApi, "");
+});
